@@ -1,8 +1,11 @@
+# Python & Virtual Environment
+venv/
 __pycache__/
 *.pyc
-venv/
+
+# Local Vector DB & Temp Files
+chroma_db/
+temp_*
+
+# Environment Variables
 .env
-data/uploads/*
-data/chroma_db/*
-!data/uploads/.gitkeep
-!data/chroma_db/.gitkeep

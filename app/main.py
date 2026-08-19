@@ -35,7 +35,7 @@ embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-
 vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
+    model="models/gemini-1.5-flash",
     temperature=0.2,
     google_api_key=os.getenv("GOOGLE_API_KEY")
 )
