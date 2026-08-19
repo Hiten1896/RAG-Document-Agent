@@ -1,13 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-import { uploadDocument, queryDocument } from '@/lib/api';
+import { uploadDocument, queryDocument, SourceMetadata } from '@/lib/api';
 import { Upload, Send, FileText, Bot, User, Loader2, CheckCircle2 } from 'lucide-react';
 
 interface Message {
   sender: 'user' | 'agent';
   text: string;
-  sources?: string[];
+  sources?: (string | SourceMetadata)[];
 }
 
 export default function Home() {
@@ -60,7 +60,7 @@ export default function Home() {
         ...prev,
         {
           sender: 'agent',
-          text: res.answer || res.response || 'No answer returned.',
+          text: res.answer || 'No answer returned.',
           sources: res.sources || [],
         },
       ]);
@@ -88,7 +88,7 @@ export default function Home() {
             </div>
             <div>
               <h1 className="font-semibold text-slate-100">DocAgent RAG</h1>
-              <p className="text-xs text-slate-400">Gemini 1.5 + ChromaDB</p>
+              <p className="text-xs text-slate-400">Gemini + ChromaDB</p>
             </div>
           </div>
 
@@ -183,9 +183,39 @@ export default function Home() {
               >
                 <p className="whitespace-pre-wrap">{msg.text}</p>
                 {msg.sources && msg.sources.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-slate-800 text-xs text-slate-400">
-                    <span className="font-semibold text-slate-300">Sources:</span>{' '}
-                    {msg.sources.join(', ')}
+                  <div className="mt-3 pt-3 border-t border-slate-800/80 text-xs">
+                    <div className="font-semibold text-slate-300 mb-1.5">Sources:</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {msg.sources.map((src, srcIndex) => {
+                        let label = '';
+                        if (typeof src === 'string') {
+                          label = src;
+                        } else if (src && typeof src === 'object') {
+                          const hasPage = src.page !== undefined && src.page !== null && src.page !== '' && src.page !== 'N/A';
+                          const hasSource = Boolean(src.source);
+                          if (hasSource && hasPage) {
+                            label = `${src.source} (Page ${src.page})`;
+                          } else if (hasPage) {
+                            label = `Page ${src.page}`;
+                          } else if (hasSource) {
+                            label = src.source;
+                          } else {
+                            label = 'Document Context';
+                          }
+                        } else {
+                          label = 'Document Context';
+                        }
+
+                        return (
+                          <span
+                            key={srcIndex}
+                            className="inline-flex items-center px-2 py-0.5 rounded bg-slate-800 border border-slate-700/70 text-indigo-300 text-xs"
+                          >
+                            {label}
+                          </span>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </div>

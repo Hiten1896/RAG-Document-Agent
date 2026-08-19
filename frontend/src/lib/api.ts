@@ -1,6 +1,25 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
 
-export async function uploadDocument(file: File) {
+export interface SourceMetadata {
+    source: string;
+    page: number | string;
+    relevance_score?: number;
+}
+
+export interface UploadResponse {
+    status: string;
+    filename: string;
+    pages: number;
+    chunks: number;
+}
+
+export interface QueryResponse {
+    query: string;
+    answer: string;
+    sources: SourceMetadata[];
+}
+
+export async function uploadDocument(file: File): Promise<UploadResponse> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -17,7 +36,7 @@ export async function uploadDocument(file: File) {
     return response.json();
 }
 
-export async function queryDocument(question: string) {
+export async function queryDocument(question: string): Promise<QueryResponse> {
     const response = await fetch(`${API_BASE_URL}/query`, {
         method: 'POST',
         headers: {
