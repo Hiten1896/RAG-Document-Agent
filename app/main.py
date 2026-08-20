@@ -43,12 +43,31 @@ vectorstore = Chroma(
 class QueryRequest(BaseModel):
     question: str
 
+
+def add_documents_with_retry(vectorstore, batch, max_retries=5):
+    """Embeds a batch of documents into Chroma with automatic retry handling for 429 rate limits."""
+    for attempt in range(max_retries):
+        try:
+            vectorstore.add_documents(batch)
+            return
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                wait_time = (attempt + 1) * 6  # Backoff delay: 6s, 12s, 18s...
+                print(f"WARNING: Gemini Embedding Rate Limit hit (429). Retrying batch in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                raise e
+    raise HTTPException(status_code=429, detail="Gemini API rate limit exceeded. Please wait a minute and try again.")
+
+
 @app.get("/")
 def read_root():
     return {
         "status": "FastAPI Backend Active",
         "message": "DocAgent Multi-Modal RAG Service is running"
     }
+
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -83,19 +102,19 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not extracted_documents:
             raise HTTPException(status_code=400, detail="No readable text found in document.")
 
-        # Split text into manageable chunks
+        # Larger chunk size produces fewer total chunks to reduce API calls
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1500,
+            chunk_size=2000,
             chunk_overlap=200
         )
         chunks = text_splitter.split_documents(extracted_documents)
 
-        # Batch ingestion with delay to prevent hitting Gemini API 429 rate limits (100 RPM limit)
-        batch_size = 10
+        # Batch ingestion with small batch sizes and delays
+        batch_size = 5
         for i in range(0, len(chunks), batch_size):
             batch = chunks[i : i + batch_size]
-            vectorstore.add_documents(batch)
-            time.sleep(1.5)
+            add_documents_with_retry(vectorstore, batch)
+            time.sleep(3)  # Gentle delay between batches
 
         return {
             "status": "success",
@@ -105,8 +124,11 @@ async def upload_pdf(file: UploadFile = File(...)):
             "message": "Document ingested successfully."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/query")
 async def query_doc(request: QueryRequest):
