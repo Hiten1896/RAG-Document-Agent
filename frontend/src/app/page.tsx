@@ -35,9 +35,6 @@ interface Message {
   sources?: SourceMetadata[];
 }
 
-/**
- * Safely extract a human-readable string from a caught value.
- */
 function getErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === 'string' && err.trim()) return err;
@@ -55,7 +52,6 @@ function getErrorMessage(err: unknown, fallback: string): string {
   return fallback;
 }
 
-/* ───── Component ───── */
 export default function Home() {
   /* Upload state */
   const [file, setFile] = useState<File | null>(null);
@@ -119,7 +115,7 @@ export default function Home() {
     applyTheme(theme === 'dark' ? 'light' : 'dark');
   };
 
-  /* Voice search */
+  /* Voice search setup */
   const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -135,45 +131,16 @@ export default function Home() {
       return;
     }
 
-    const recognition = new SpeechRecognitionCtor();
-    recognition.continuous = false;
-    recognition.lang = 'en-US';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onresult = (event: any) => {
-      const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
-      if (transcript.trim()) {
-        setQuery(transcript.trim());
-      }
-    };
-
-    recognition.onend = () => {
-      setListening(false);
-    };
-
-    recognition.onerror = (event: any) => {
-      setListening(false);
-      const code = event?.error;
-      if (code === 'not-allowed' || code === 'service-not-allowed') {
-        setMicError('Microphone access was denied. Enable it in your browser settings to use voice search.');
-      } else if (code === 'no-speech') {
-        setMicError("Didn't catch that — try again.");
-      } else {
-        setMicError('Voice search failed. Please try again.');
-      }
-    };
-
-    recognitionRef.current = recognition;
     setMicSupported(true);
 
     return () => {
-      try {
-        recognition.stop();
-      } catch {
-        // no-op
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {
+          // ignore
+        }
       }
-      recognitionRef.current = null;
     };
   }, []);
 
@@ -183,19 +150,64 @@ export default function Home() {
     return () => clearTimeout(id);
   }, [micError]);
 
-  const handleMicClick = () => {
-    const recognition = recognitionRef.current;
-    if (!recognition) return;
+  const handleMicClick = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
 
-    if (listening) {
-      recognition.stop();
+    if (typeof window === 'undefined') return;
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setMicError('Voice search is not supported in this browser.');
+      return;
+    }
+
+    if (listening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
       setListening(false);
       return;
     }
 
     setMicError(null);
     try {
+      const recognition = new SpeechRecognitionCtor();
+      recognition.continuous = false;
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onresult = (event: any) => {
+        const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
+        if (transcript.trim()) {
+          setQuery(transcript.trim());
+        }
+      };
+
+      recognition.onend = () => {
+        setListening(false);
+      };
+
+      recognition.onerror = (event: any) => {
+        setListening(false);
+        const code = event?.error;
+        if (code === 'not-allowed' || code === 'service-not-allowed') {
+          setMicError('Microphone access was denied. Please allow mic permission.');
+        } else if (code === 'no-speech') {
+          setMicError("Didn't catch that — try speaking again.");
+        } else {
+          setMicError('Voice search failed. Please try again.');
+        }
+      };
+
       recognition.start();
+      recognitionRef.current = recognition;
       setListening(true);
     } catch {
       setListening(false);
@@ -242,6 +254,10 @@ export default function Home() {
     }
   };
 
+  const handleTriggerUpload = () => {
+    fileInputRef.current?.click();
+  };
+
   /* Drag & Drop */
   const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -269,7 +285,7 @@ export default function Home() {
 
   /* Ingestion */
   const triggerAutoIngest = async (fileToIngest: File) => {
-    if (!fileToIngest.name.endsWith('.pdf')) {
+    if (!fileToIngest.name.toLowerCase().endsWith('.pdf')) {
       setUploadStatus({ type: 'error', message: 'Only PDF documents are supported.' });
       return;
     }
@@ -334,8 +350,8 @@ export default function Home() {
   };
 
   /* Query */
-  const handleSendQuery = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSendQuery = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!query.trim() || loading) return;
 
     const userText = query.trim();
@@ -435,6 +451,16 @@ export default function Home() {
         themeReady ? '' : 'invisible'
       }`}
     >
+      {/* Hidden File Input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".pdf"
+        onChange={handleFileChange}
+        className="hidden"
+        id="file-auto-upload"
+      />
+
       {/* Mic Error Toast */}
       {micError && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-600 dark:text-red-300 text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-center gap-2 animate-fade-in max-w-[90vw]">
@@ -477,20 +503,20 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-1">
-              {/* Theme Toggle Button */}
               <button
+                type="button"
                 onClick={toggleTheme}
-                className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700/80 text-slate-600 dark:text-slate-300 transition duration-200"
+                className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700/80 text-slate-600 dark:text-slate-300 transition duration-200 cursor-pointer"
                 aria-label="Toggle theme"
                 title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               >
                 {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
               </button>
 
-              {/* Close Sidebar (Mobile) */}
               <button
+                type="button"
                 onClick={() => setSidebarOpen(false)}
-                className="md:hidden p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition"
+                className="md:hidden p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
                 aria-label="Close sidebar"
               >
                 <X className="w-5 h-5" />
@@ -500,11 +526,12 @@ export default function Home() {
 
           {/* New Chat Button */}
           <button
+            type="button"
             onClick={() => {
               handleNewChat();
               setSidebarOpen(false);
             }}
-            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700/70 hover:border-indigo-500/50 bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/40 dark:hover:bg-slate-800/70 text-sm font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 transition duration-200"
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700/70 hover:border-indigo-500/50 bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/40 dark:hover:bg-slate-800/70 text-sm font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 transition duration-200 cursor-pointer"
           >
             <MessageSquarePlus className="w-4 h-4 text-indigo-600 dark:text-indigo-400" /> New Chat
           </button>
@@ -518,12 +545,13 @@ export default function Home() {
               <span className="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium">Auto-Ingest</span>
             </div>
 
-            <div
-              onClick={() => fileInputRef.current?.click()}
+            <button
+              type="button"
+              onClick={handleTriggerUpload}
               onDragOver={onDragOver}
               onDragLeave={onDragLeave}
               onDrop={onDrop}
-              className={`relative border-2 border-dashed rounded-2xl p-5 text-center transition duration-200 cursor-pointer ${
+              className={`w-full relative border-2 border-dashed rounded-2xl p-5 text-center transition duration-200 cursor-pointer text-left block ${
                 dragOver
                   ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/30 scale-[1.02]'
                   : uploading
@@ -531,15 +559,6 @@ export default function Home() {
                   : 'border-slate-300 dark:border-slate-700/70 hover:border-indigo-500/60 bg-slate-50 dark:bg-slate-900/40 hover:bg-slate-100 dark:hover:bg-slate-800/40'
               }`}
             >
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                onChange={handleFileChange}
-                className="hidden"
-                id="file-auto-upload"
-              />
-
               <div className="flex flex-col items-center gap-2.5">
                 {uploading ? (
                   <div className="relative">
@@ -552,7 +571,7 @@ export default function Home() {
                   </div>
                 )}
 
-                <div>
+                <div className="text-center">
                   <div className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate max-w-[220px]">
                     {file ? file.name : 'Select or Drop PDF'}
                   </div>
@@ -561,7 +580,7 @@ export default function Home() {
                   </div>
                 </div>
               </div>
-            </div>
+            </button>
 
             {/* Status Card */}
             {uploadStatus && (
@@ -654,10 +673,10 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-3">
-            {/* Desktop Theme Toggle Button */}
             <button
+              type="button"
               onClick={toggleTheme}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 transition duration-200"
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 transition duration-200 cursor-pointer"
               title="Toggle theme"
             >
               {theme === 'dark' ? (
@@ -678,8 +697,9 @@ export default function Home() {
         {/* Mobile Top Bar */}
         <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
           <button
+            type="button"
             onClick={() => setSidebarOpen(true)}
-            className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition"
+            className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition cursor-pointer"
             aria-label="Open sidebar"
           >
             <Menu className="w-5 h-5" />
@@ -692,15 +712,17 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-1">
             <button
+              type="button"
               onClick={toggleTheme}
-              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition"
+              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition cursor-pointer"
               aria-label="Toggle theme"
             >
               {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
             </button>
             <button
+              type="button"
               onClick={handleNewChat}
-              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition"
+              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition cursor-pointer"
               aria-label="New chat"
             >
               <MessageSquarePlus className="w-5 h-5" />
@@ -725,10 +747,14 @@ export default function Home() {
                 Powered by Gemini and vector search.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-lg">
-                <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 shadow-sm">
+                <button
+                  type="button"
+                  onClick={handleTriggerUpload}
+                  className="flex flex-col items-center gap-2 p-4 rounded-xl bg-white dark:bg-slate-900/60 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 shadow-sm transition cursor-pointer"
+                >
                   <FileUp className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
                   <span>Upload PDF</span>
-                </div>
+                </button>
                 <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 shadow-sm">
                   <Zap className="w-5 h-5 text-amber-500 dark:text-amber-400" />
                   <span>Auto-Ingest</span>
@@ -782,14 +808,16 @@ export default function Home() {
                       />
                       <div className="flex justify-end gap-2 text-xs">
                         <button
+                          type="button"
                           onClick={handleCancelEdit}
-                          className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition flex items-center gap-1"
+                          className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition flex items-center gap-1 cursor-pointer"
                         >
                           <X className="w-3.5 h-3.5" /> Cancel
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleSaveEdit(index)}
-                          className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition flex items-center gap-1 shadow-md shadow-indigo-600/30"
+                          className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition flex items-center gap-1 shadow-md shadow-indigo-600/30 cursor-pointer"
                         >
                           <Check className="w-3.5 h-3.5" /> Save & Regenerate
                         </button>
@@ -853,8 +881,9 @@ export default function Home() {
                   {/* Edit button */}
                   {isUser && !isEditing && (
                     <button
+                      type="button"
                       onClick={() => handleStartEdit(index, msg.text)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-300 flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-slate-200/50 dark:hover:bg-slate-800/50"
+                      className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-300 flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-slate-200/50 dark:hover:bg-slate-800/50 cursor-pointer"
                       title="Edit this query and regenerate response"
                     >
                       <Edit3 className="w-3 h-3" /> Edit query
@@ -890,8 +919,8 @@ export default function Home() {
             {/* Mobile upload toggle */}
             <button
               type="button"
-              onClick={() => setSidebarOpen(true)}
-              className="md:hidden bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0"
+              onClick={handleTriggerUpload}
+              className="md:hidden bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer"
               aria-label="Upload document"
             >
               <FileUp className="w-4 h-4 sm:w-5 sm:h-5" />
@@ -907,21 +936,19 @@ export default function Home() {
                 className="w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-11 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 shadow-inner"
               />
 
-              {/* Mic button (voice search) */}
-              {micSupported && (
-                <button
-                  type="button"
-                  onClick={handleMicClick}
-                  className={`absolute right-3 p-1.5 rounded-lg transition ${
-                    listening
-                      ? 'bg-red-500 text-white animate-pulse'
-                      : 'text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800'
-                  }`}
-                  title={listening ? 'Stop listening' : 'Voice input'}
-                >
-                  <Mic className="w-4 h-4" />
-                </button>
-              )}
+              {/* Mic button */}
+              <button
+                type="button"
+                onClick={handleMicClick}
+                className={`absolute right-3 p-1.5 rounded-lg transition cursor-pointer z-10 ${
+                  listening
+                    ? 'bg-red-500 text-white animate-pulse'
+                    : 'text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800'
+                }`}
+                title={listening ? 'Stop listening' : 'Voice input'}
+              >
+                <Mic className="w-4 h-4" />
+              </button>
             </div>
 
             {/* Submit button */}
