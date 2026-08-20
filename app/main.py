@@ -16,8 +16,8 @@ from langchain_community.vectorstores import Chroma
 load_dotenv()
 
 # ── API Key Verification ──
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
+GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GOOGLE_API_KEY:
     raise RuntimeError("GEMINI_API_KEY environment variable is missing.")
 
 # ── FastAPI App Setup ──
