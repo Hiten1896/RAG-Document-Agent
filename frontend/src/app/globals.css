@@ -1,25 +1,16 @@
-@import "tailwindcss";
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
-/* Class-based dark mode for Tailwind v4 */
-@custom-variant dark (&:where(.dark, .dark *));
-
+/* Smooth background/color defaults */
 :root {
   color-scheme: light;
 }
 
-html.dark,
-html[data-theme='dark'] {
+html.dark {
   color-scheme: dark;
 }
 
 body {
-  background-color: #f8fafc;
-  color: #0f172a;
-  transition: background-color 0.2s ease, color 0.2s ease;
-}
-
-html.dark body,
-html[data-theme='dark'] body {
-  background-color: #020617;
-  color: #f8fafc;
+  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-200;
 }
