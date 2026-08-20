@@ -15,10 +15,11 @@ from langchain_community.vectorstores import Chroma
 
 load_dotenv()
 
-# ── API Key Verification ──
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GOOGLE_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY environment variable is missing.")
+# ── API Key Verification (Supports both GEMINI_API_KEY and GOOGLE_API_KEY) ──
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+
+if not GEMINI_API_KEY:
+    raise RuntimeError("Neither GEMINI_API_KEY nor GOOGLE_API_KEY was found in environment variables.")
 
 # ── FastAPI App Setup ──
 app = FastAPI(title="DocAgent RAG Backend", version="2.0")
@@ -32,7 +33,6 @@ app.add_middleware(
 )
 
 # ── Embedding & LLM Setup ──
-# Note: Use "text-embedding-004" without the "models/" prefix for langchain-google-genai
 embeddings = GoogleGenerativeAIEmbeddings(
     model="text-embedding-004",
     google_api_key=GEMINI_API_KEY
@@ -86,7 +86,6 @@ def process_pdf_in_background(file_path: str, filename: str):
         for chunk in chunks:
             chunk.metadata["source"] = filename
             if "page" in chunk.metadata:
-                # Ensure 1-based page indexing
                 chunk.metadata["page"] = chunk.metadata["page"] + 1
 
         # 4. Embed & insert into ChromaDB
@@ -124,7 +123,6 @@ async def ingest_document(file: UploadFile = File(...), background_tasks: Backgr
 
     filename = file.filename
 
-    # Save to a temporary file
     temp_dir = tempfile.gettempdir()
     temp_path = os.path.join(temp_dir, f"upload_{filename}")
 
@@ -133,7 +131,6 @@ async def ingest_document(file: UploadFile = File(...), background_tasks: Backgr
 
     ingestion_jobs[filename] = {"status": "processing", "filename": filename}
 
-    # Process in background task
     background_tasks.add_task(process_pdf_in_background, temp_path, filename)
 
     return {"filename": filename, "status": "processing", "message": "Ingestion initiated."}
@@ -151,7 +148,6 @@ def query_documents(payload: QueryRequest):
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
     try:
-        # 1. Similarity search in Chroma
         retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
         retrieved_docs = retriever.invoke(payload.question)
 
@@ -161,7 +157,6 @@ def query_documents(payload: QueryRequest):
                 sources=[]
             )
 
-        # 2. Build context and extract sources
         context_parts = []
         sources = []
 
@@ -178,7 +173,6 @@ def query_documents(payload: QueryRequest):
 
         context_text = "\n\n---\n\n".join(context_parts)
 
-        # 3. Prompt LLM
         prompt = f"""You are a helpful assistant analyzing user documents. 
 Answer the following question using only the provided context below. If you do not know the answer based on the context, state that clearly.
 
