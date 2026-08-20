@@ -85,7 +85,12 @@ export default function Home() {
 
   const applyTheme = useCallback((next: 'dark' | 'light') => {
     if (typeof document !== 'undefined') {
-      document.documentElement.classList.toggle('dark', next === 'dark');
+      const root = document.documentElement;
+      if (next === 'dark') {
+        root.classList.add('dark');
+      } else {
+        root.classList.remove('dark');
+      }
     }
     setThemeState(next);
     try {
@@ -111,28 +116,21 @@ export default function Home() {
     setThemeReady(true);
   }, [applyTheme]);
 
-  const toggleTheme = () => {
-    applyTheme(theme === 'dark' ? 'light' : 'dark');
+  const toggleTheme = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const next = theme === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
   };
 
   /* Voice search setup */
-  const [micSupported, setMicSupported] = useState(false);
   const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-    if (!SpeechRecognitionCtor) {
-      setMicSupported(false);
-      return;
-    }
-
-    setMicSupported(true);
-
     return () => {
       if (recognitionRef.current) {
         try {
@@ -254,7 +252,11 @@ export default function Home() {
     }
   };
 
-  const handleTriggerUpload = () => {
+  const handleTriggerUpload = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     fileInputRef.current?.click();
   };
 
