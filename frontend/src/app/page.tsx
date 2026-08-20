@@ -80,49 +80,50 @@ export default function Home() {
   const [dragOver, setDragOver] = useState(false);
 
   /* Theme state */
-  const [theme, setThemeState] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [themeReady, setThemeReady] = useState(false);
 
-  const applyTheme = useCallback((next: 'dark' | 'light') => {
-    if (typeof document !== 'undefined') {
-      const root = document.documentElement;
-      if (next === 'dark') {
-        root.classList.add('dark');
-      } else {
-        root.classList.remove('dark');
-      }
-    }
-    setThemeState(next);
+  useEffect(() => {
+    let initialTheme: 'dark' | 'light' = 'dark';
     try {
-      localStorage.setItem('docagent_theme', next);
+      const saved = localStorage.getItem('docagent_theme') as 'dark' | 'light' | null;
+      if (saved === 'dark' || saved === 'light') {
+        initialTheme = saved;
+      } else if (typeof window !== 'undefined' && window.matchMedia) {
+        initialTheme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
     } catch {
       // safe fallback
     }
-  }, []);
 
-  useEffect(() => {
-    let initial: 'dark' | 'light' = 'dark';
-    try {
-      const saved = localStorage.getItem('docagent_theme');
-      if (saved === 'dark' || saved === 'light') {
-        initial = saved;
-      } else if (typeof window !== 'undefined' && window.matchMedia) {
-        initial = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-      }
-    } catch {
-      // ignore
+    setTheme(initialTheme);
+    if (initialTheme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
     }
-    applyTheme(initial);
     setThemeReady(true);
-  }, [applyTheme]);
+  }, []);
 
   const toggleTheme = (e?: React.MouseEvent) => {
     if (e) {
       e.preventDefault();
       e.stopPropagation();
     }
-    const next = theme === 'dark' ? 'light' : 'dark';
-    applyTheme(next);
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+
+    if (nextTheme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+
+    try {
+      localStorage.setItem('docagent_theme', nextTheme);
+    } catch {
+      // safe fallback
+    }
   };
 
   /* Voice search setup */
