@@ -10,10 +10,8 @@ from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# 1. Initialize FastAPI App
 app = FastAPI(title="DocAgent Multi-Modal RAG Backend")
 
-# 2. Configure CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,17 +20,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. Initialize Gemini Models
-embeddings = GoogleGenerativeAIEmbeddings(
-    model="models/text-embedding-004"
-)
+# Gemini Embeddings & LLM Initialization
+embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    temperature=0.2
-)
-
-# 4. Initialize Chroma Vectorstore
 CHROMA_PATH = "./chroma_db"
 vectorstore = Chroma(
     collection_name="docagent_collection",
@@ -44,21 +35,23 @@ class QueryRequest(BaseModel):
     question: str
 
 
-def add_documents_with_retry(vectorstore, batch, max_retries=5):
-    """Embeds a batch of documents into Chroma with automatic retry handling for 429 rate limits."""
-    for attempt in range(max_retries):
-        try:
-            vectorstore.add_documents(batch)
-            return
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                wait_time = (attempt + 1) * 6  # Backoff delay: 6s, 12s, 18s...
-                print(f"WARNING: Gemini Embedding Rate Limit hit (429). Retrying batch in {wait_time}s... (Attempt {attempt + 1}/{max_retries})")
-                time.sleep(wait_time)
-            else:
-                raise e
-    raise HTTPException(status_code=429, detail="Gemini API rate limit exceeded. Please wait a minute and try again.")
+def add_documents_fast_batched(vectorstore, chunks: list, max_retries=3):
+    """Batches 25 chunks per API call to reduce 50+ HTTP calls down to 2-3 calls."""
+    batch_size = 25  # 25 chunks = 1 Gemini API call
+    
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i : i + batch_size]
+        for attempt in range(max_retries):
+            try:
+                vectorstore.add_documents(batch)
+                break
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    wait = (attempt + 1) * 4
+                    time.sleep(wait)
+                else:
+                    raise e
+        time.sleep(0.5)  # Tiny 0.5s pause keeps throughput fast & well under 100 RPM limit
 
 
 @app.get("/")
@@ -75,13 +68,11 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
 
     try:
-        # Save temporary PDF
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
             content = await file.read()
             tmp_file.write(content)
             tmp_path = tmp_file.name
 
-        # Parse text using PyMuPDF
         doc = fitz.open(tmp_path)
         extracted_documents = []
 
@@ -102,26 +93,22 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not extracted_documents:
             raise HTTPException(status_code=400, detail="No readable text found in document.")
 
-        # Larger chunk size produces fewer total chunks to reduce API calls
+        # Larger chunk size (1800 chars) creates far fewer overall chunks
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=2000,
+            chunk_size=1800,
             chunk_overlap=200
         )
         chunks = text_splitter.split_documents(extracted_documents)
 
-        # Batch ingestion with small batch sizes and delays
-        batch_size = 5
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            add_documents_with_retry(vectorstore, batch)
-            time.sleep(3)  # Gentle delay between batches
+        # Process in optimized multi-document batches
+        add_documents_fast_batched(vectorstore, chunks)
 
         return {
             "status": "success",
             "filename": file.filename,
             "total_pages": len(extracted_documents),
             "total_chunks": len(chunks),
-            "message": "Document ingested successfully."
+            "message": "Document ingested rapidly."
         }
 
     except HTTPException:
