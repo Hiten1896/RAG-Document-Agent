@@ -8,3 +8,4 @@ langchain-google-genai
 langchain-chroma
 python-dotenv
 pydantic
+python-multipart
