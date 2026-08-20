@@ -14,7 +14,7 @@ import pymupdf
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from google import genai
 from google.genai import types
@@ -40,7 +40,8 @@ os.makedirs(CHROMA_DIR, exist_ok=True)
 ingestion_status: Dict[str, Dict[str, Any]] = {}
 
 # Initialize Gemini Vector Search Embeddings (Lightweight for 512MB RAM)
-embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+# Change this line:
+embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004")
 vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
 # Initialize Gemini LLM
