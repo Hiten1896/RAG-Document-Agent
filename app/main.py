@@ -1,17 +1,27 @@
 import os
-import time
+import shutil
 import tempfile
-import fitz  # PyMuPDF
-from typing import Dict, Any
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, status
+from typing import Dict, List, Optional
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from dotenv import load_dotenv
 
-app = FastAPI(title="DocAgent RAG API", version="2.0.0")
+# LangChain & Google GenAI Imports
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_community.vectorstores import Chroma
+
+load_dotenv()
+
+# ── API Key Verification ──
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY environment variable is missing.")
+
+# ── FastAPI App Setup ──
+app = FastAPI(title="DocAgent RAG Backend", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,115 +31,170 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Models & Storage
-embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.2)
-
-CHROMA_PATH = "./chroma_db"
-vectorstore = Chroma(
-    collection_name="docagent_collection",
-    embedding_function=embeddings,
-    persist_directory=CHROMA_PATH
+# ── Embedding & LLM Setup ──
+# Note: Use "text-embedding-004" without the "models/" prefix for langchain-google-genai
+embeddings = GoogleGenerativeAIEmbeddings(
+    model="text-embedding-004",
+    google_api_key=GEMINI_API_KEY
 )
 
-ingestion_status: Dict[str, Dict[str, Any]] = {}
+PERSIST_DIR = "./chroma_db"
+vectorstore = Chroma(
+    persist_directory=PERSIST_DIR,
+    embedding_function=embeddings
+)
 
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    google_api_key=GEMINI_API_KEY,
+    temperature=0.2
+)
+
+# In-memory status tracker for document ingestion jobs
+ingestion_jobs: Dict[str, dict] = {}
+
+# ── Data Models ──
 class QueryRequest(BaseModel):
-    query: str
+    question: str
 
+class SourceMetadata(BaseModel):
+    source: str
+    page: Optional[int] = 1
+    chunk_type: Optional[str] = "text"
 
-def fast_process_pdf(file_bytes: bytes, filename: str):
-    """Ultra-fast text extraction and batch embedding without slow vision calls."""
-    ingestion_status[filename] = {"status": "processing", "filename": filename}
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[SourceMetadata]
+
+# ── Background Worker ──
+def process_pdf_in_background(file_path: str, filename: str):
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        extracted_documents = []
+        ingestion_jobs[filename] = {"status": "processing", "filename": filename}
 
-        for page_num in range(len(doc)):
-            text = doc[page_num].get_text("text").strip()
-            if text:
-                extracted_documents.append(
-                    Document(
-                        page_content=text,
-                        metadata={"source": filename, "page": page_num + 1}
-                    )
-                )
-        doc.close()
+        # 1. Load document
+        loader = PyPDFLoader(file_path)
+        docs = loader.load()
 
-        if not extracted_documents:
-            ingestion_status[filename] = {"status": "failed", "error": "No text found in PDF"}
-            return
+        # 2. Chunk text efficiently
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=150
+        )
+        chunks = text_splitter.split_documents(docs)
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-        chunks = text_splitter.split_documents(extracted_documents)
+        # 3. Add metadata tag
+        for chunk in chunks:
+            chunk.metadata["source"] = filename
+            if "page" in chunk.metadata:
+                # Ensure 1-based page indexing
+                chunk.metadata["page"] = chunk.metadata["page"] + 1
 
-        # Single-pass batch embedding for high speed
+        # 4. Embed & insert into ChromaDB
         vectorstore.add_documents(chunks)
 
-        ingestion_status[filename] = {
+        # 5. Update completed status
+        ingestion_jobs[filename] = {
             "status": "completed",
             "filename": filename,
-            "pages": len(extracted_documents),
-            "chunks": len(chunks)
+            "pages": len(docs),
+            "chunks": len(chunks),
+            "text_chunks": len(chunks),
+            "visual_chunks": 0
         }
     except Exception as e:
-        ingestion_status[filename] = {"status": "failed", "error": str(e)}
+        ingestion_jobs[filename] = {
+            "status": "failed",
+            "filename": filename,
+            "error": str(e)
+        }
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
+# ── Endpoints ──
 
 @app.get("/")
-def read_root():
-    return {"status": "FastAPI Backend Active", "message": "DocAgent RAG Service is running"}
+def health_check():
+    return {"status": "online", "message": "FastAPI RAG Pipeline Active"}
 
-
-@app.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
-async def ingest_pdf_async(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+@app.post("/ingest")
+async def ingest_document(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    content = await file.read()
-    background_tasks.add_task(fast_process_pdf, content, file.filename)
+    filename = file.filename
 
-    return {
-        "status": "accepted",
-        "message": "Ingestion started in background.",
-        "filename": file.filename
-    }
+    # Save to a temporary file
+    temp_dir = tempfile.gettempdir()
+    temp_path = os.path.join(temp_dir, f"upload_{filename}")
 
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
 
-@app.get("/ingest/status/{filename}")
-async def get_ingest_status(filename: str):
-    return ingestion_status.get(filename, {"status": "not_found", "filename": filename})
+    ingestion_jobs[filename] = {"status": "processing", "filename": filename}
 
+    # Process in background task
+    background_tasks.add_task(process_pdf_in_background, temp_path, filename)
 
-@app.post("/upload")
-async def upload_pdf_sync(file: UploadFile = File(...)):
-    if not file.filename.endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    return {"filename": filename, "status": "processing", "message": "Ingestion initiated."}
 
-    content = await file.read()
-    fast_process_pdf(content, file.filename)
-    res = ingestion_status.get(file.filename, {})
-    
-    if res.get("status") == "failed":
-        raise HTTPException(status_code=400, detail=res.get("error"))
+@app.get("/status/{filename}")
+def check_status(filename: str):
+    job = ingestion_jobs.get(filename)
+    if not job:
+        return {"status": "not_found", "filename": filename}
+    return job
 
-    return {"status": "success", "filename": file.filename, "chunks": res.get("chunks", 0)}
+@app.post("/query", response_model=QueryResponse)
+def query_documents(payload: QueryRequest):
+    if not payload.question.strip():
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-
-@app.post("/query")
-async def query_doc(request: QueryRequest):
     try:
+        # 1. Similarity search in Chroma
         retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-        relevant_docs = retriever.invoke(request.query)
+        retrieved_docs = retriever.invoke(payload.question)
 
-        context = "\n\n".join([d.page_content for d in relevant_docs])
-        prompt = f"Context:\n{context}\n\nQuestion: {request.query}\n\nAnswer:"
+        if not retrieved_docs:
+            return QueryResponse(
+                answer="No relevant content found in uploaded documents.",
+                sources=[]
+            )
+
+        # 2. Build context and extract sources
+        context_parts = []
+        sources = []
+
+        for doc in retrieved_docs:
+            context_parts.append(doc.page_content)
+            source_name = doc.metadata.get("source", "Document")
+            page_num = doc.metadata.get("page", 1)
+            
+            sources.append(SourceMetadata(
+                source=source_name,
+                page=page_num,
+                chunk_type="text"
+            ))
+
+        context_text = "\n\n---\n\n".join(context_parts)
+
+        # 3. Prompt LLM
+        prompt = f"""You are a helpful assistant analyzing user documents. 
+Answer the following question using only the provided context below. If you do not know the answer based on the context, state that clearly.
+
+Context:
+{context_text}
+
+Question: {payload.question}
+
+Answer:"""
 
         response = llm.invoke(prompt)
-        return {
-            "query": request.query,
-            "answer": response.content,
-            "sources": [d.metadata for d in relevant_docs]
-        }
+
+        return QueryResponse(
+            answer=response.content,
+            sources=sources
+        )
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
