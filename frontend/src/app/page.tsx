@@ -22,6 +22,10 @@ import {
   Zap,
   Search,
   FileUp,
+  Mic,
+  MicOff,
+  Sun,
+  Moon,
 } from 'lucide-react';
 
 /* ───── Types ───── */
@@ -29,6 +33,29 @@ interface Message {
   sender: 'user' | 'agent';
   text: string;
   sources?: SourceMetadata[];
+}
+
+/**
+ * Safely extract a human-readable string from a caught value.
+ * api.ts already normalizes backend error payloads into `Error` instances,
+ * but this guards against any non-Error value (string, plain object, etc.)
+ * ever bubbling up, so we never render "[object Object]" in the chat UI.
+ */
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err.trim()) return err;
+  if (err && typeof err === 'object') {
+    const maybeDetail = (err as { detail?: unknown }).detail;
+    if (typeof maybeDetail === 'string' && maybeDetail.trim()) return maybeDetail;
+    const maybeMessage = (err as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
 }
 
 /* ───── Component ───── */
@@ -58,6 +85,135 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  /* Theme state ('dark' | 'light'), persisted to localStorage, defaulting
+     to the user's OS preference on first visit. Applied by toggling the
+     `dark` class on <html> so Tailwind's `dark:` variants take effect
+     (requires darkMode: 'class' in tailwind.config). */
+  const [theme, setThemeState] = useState<'dark' | 'light'>('dark');
+  const [themeReady, setThemeReady] = useState(false);
+
+  const applyTheme = useCallback((next: 'dark' | 'light') => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.classList.toggle('dark', next === 'dark');
+    }
+    setThemeState(next);
+    try {
+      localStorage.setItem('docagent_theme', next);
+    } catch {
+      // localStorage may be unavailable (privacy mode, SSR edge cases) — theme
+      // still applies for this session via the DOM class above.
+    }
+  }, []);
+
+  useEffect(() => {
+    let initial: 'dark' | 'light' = 'dark';
+    try {
+      const saved = localStorage.getItem('docagent_theme');
+      if (saved === 'dark' || saved === 'light') {
+        initial = saved;
+      } else if (typeof window !== 'undefined' && window.matchMedia) {
+        initial = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+    } catch {
+      // ignore and fall back to 'dark'
+    }
+    applyTheme(initial);
+    setThemeReady(true);
+  }, [applyTheme]);
+
+  const toggleTheme = () => {
+    applyTheme(theme === 'dark' ? 'light' : 'dark');
+  };
+
+  /* Voice search: real Web Speech API, mirroring the mic behavior from the
+     MyWay/Movie Hunt UI. Guards for browser support since SpeechRecognition
+     is not available everywhere (e.g. Firefox desktop, most non-Chromium
+     browsers) — the button hides itself gracefully when unsupported. */
+  const [micSupported, setMicSupported] = useState(false);
+  const [listening, setListening] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setMicSupported(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = false;
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event: any) => {
+      const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
+      if (transcript.trim()) {
+        setQuery(transcript.trim());
+      }
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+    };
+
+    recognition.onerror = (event: any) => {
+      setListening(false);
+      const code = event?.error;
+      if (code === 'not-allowed' || code === 'service-not-allowed') {
+        setMicError('Microphone access was denied. Enable it in your browser settings to use voice search.');
+      } else if (code === 'no-speech') {
+        setMicError("Didn't catch that — try again.");
+      } else {
+        setMicError('Voice search failed. Please try again.');
+      }
+    };
+
+    recognitionRef.current = recognition;
+    setMicSupported(true);
+
+    return () => {
+      try {
+        recognition.stop();
+      } catch {
+        // no-op: recognition may already be stopped/idle
+      }
+      recognitionRef.current = null;
+    };
+  }, []);
+
+  // Auto-dismiss transient mic error toasts
+  useEffect(() => {
+    if (!micError) return;
+    const id = setTimeout(() => setMicError(null), 4000);
+    return () => clearTimeout(id);
+  }, [micError]);
+
+  const handleMicClick = () => {
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+
+    if (listening) {
+      recognition.stop();
+      setListening(false);
+      return;
+    }
+
+    setMicError(null);
+    try {
+      recognition.start();
+      setListening(true);
+    } catch {
+      // start() throws if recognition is already active/starting; ignore,
+      // the button state will resync via onend/onerror.
+      setListening(false);
+    }
+  };
 
   /* Refs */
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -185,7 +341,7 @@ export default function Home() {
 
       setTimeout(poll, 800);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to communicate with backend.';
+      const message = getErrorMessage(err, 'Failed to communicate with backend.');
       setUploadStatus({ type: 'error', message: 'Ingestion error', details: message });
       setUploading(false);
     }
@@ -208,7 +364,7 @@ export default function Home() {
         { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
       ]);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
+      const message = getErrorMessage(err, 'Unknown error');
       setMessages((prev) => [
         ...prev,
         { sender: 'agent', text: `Error processing your request: ${message}` },
@@ -248,7 +404,7 @@ export default function Home() {
         { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
       ]);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
+      const message = getErrorMessage(err, 'Unknown error');
       setMessages((prev) => [
         ...prev,
         { sender: 'agent', text: `Error regenerating answer: ${message}` },
@@ -290,7 +446,18 @@ export default function Home() {
 
   /* ─────────────────────── RENDER ─────────────────────── */
   return (
-    <div className="flex h-screen h-[100dvh] bg-slate-950 text-slate-100 font-sans antialiased overflow-hidden">
+    <div
+      className={`flex h-screen h-[100dvh] bg-white dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200 ${
+        themeReady ? '' : 'invisible'
+      }`}
+    >
+      {/* ── Mic permission / recognition error toast ── */}
+      {micError && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-600 dark:text-red-300 text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-center gap-2 animate-fade-in max-w-[90vw]">
+          <MicOff className="w-4 h-4 shrink-0" />
+          <span className="truncate">{micError}</span>
+        </div>
+      )}
 
       {/* ── Mobile Sidebar Backdrop ── */}
       {sidebarOpen && (
@@ -305,7 +472,7 @@ export default function Home() {
         className={`
           fixed inset-y-0 left-0 z-50 w-[300px] sm:w-[320px]
           md:static md:w-80 md:z-auto
-          border-r border-slate-800/80 bg-slate-900/95 md:bg-slate-900/60
+          border-r border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 md:bg-slate-50 md:dark:bg-slate-900/60
           backdrop-blur-xl p-5 md:p-6 flex flex-col justify-between shrink-0 shadow-2xl
           transition-transform duration-250 ease-out
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
