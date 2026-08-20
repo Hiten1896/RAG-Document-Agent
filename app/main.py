@@ -13,9 +13,8 @@ from pydantic import BaseModel
 import pymupdf
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_chroma import Chroma
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from google import genai
 from google.genai import types
@@ -40,13 +39,13 @@ os.makedirs(CHROMA_DIR, exist_ok=True)
 # Ingestion state tracking for async BackgroundTasks
 ingestion_status: Dict[str, Dict[str, Any]] = {}
 
-# Initialize Vector Search & HuggingFace Embedding Model
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+# Initialize Gemini Vector Search Embeddings (Lightweight for 512MB RAM)
+embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
 vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
 # Initialize Gemini LLM
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-MODEL_NAME = "gemini-3.1-flash-lite"
+MODEL_NAME = "gemini-1.5-flash"
 
 llm = ChatGoogleGenerativeAI(
     model=MODEL_NAME,
@@ -101,14 +100,6 @@ def generate_vision_description(image_bytes: bytes, mime_type: str = "image/jpeg
 
 
 def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
-    """
-    Phase 4 Multi-Modal Ingestion Pipeline:
-    1. Extracts standard text per page and chunks it with 'text' metadata.
-    2. Extracts embedded images/diagrams, uses Gemini vision to describe them,
-       and creates 'visual' chunks (Capped at 5 images to prevent timeouts).
-    3. If pages are image-only scans, renders pixmaps and generates visual transcriptions.
-    4. Indexes all valid chunks into ChromaDB.
-    """
     ingestion_status[filename] = {
         "status": "processing",
         "filename": filename,
@@ -123,17 +114,13 @@ def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
         all_documents: List[Document] = []
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
-        MAX_VISION_IMAGES = 5  # Cap visual processing per PDF to guarantee speed
-
-        # Vision jobs are collected first and run concurrently afterward,
-        # instead of blocking the loop with sequential Gemini calls per image.
-        vision_jobs: List[Dict[str, Any]] = []  # each: {image_bytes, mime_type, page_num, page_idx, image_key, label}
+        MAX_VISION_IMAGES = 5
+        vision_jobs: List[Dict[str, Any]] = []
 
         for page_idx in range(total_pages):
             page_num = page_idx + 1
             page = doc[page_idx]
 
-            # 1. Text Extraction
             raw_text = page.get_text().strip()
             if len(raw_text) > 20:
                 text_chunks = text_splitter.split_text(raw_text)
@@ -151,7 +138,6 @@ def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
                             }
                         ))
 
-            # 2. Embedded Image Extraction (queue vision jobs, cap at MAX_VISION_IMAGES total)
             image_list = page.get_images(full=True)
             extracted_images_count = 0
 
@@ -166,7 +152,6 @@ def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
                         image_ext = base_image.get("ext", "jpeg").lower()
                         mime_type = "image/png" if image_ext == "png" else "image/jpeg"
 
-                        # Skip tiny icons/decorations (< 5KB)
                         if image_bytes and len(image_bytes) >= 5000:
                             extracted_images_count += 1
                             image_key = f"{filename}_p{page_num}_img{img_idx + 1}"
@@ -181,7 +166,6 @@ def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
                     except Exception as img_err:
                         print(f"Error extracting image {img_idx} on page {page_num}: {img_err}")
 
-            # 3. Fallback for Scanned Pages (queue as a vision job too)
             if len(raw_text) <= 20 and extracted_images_count == 0 and len(vision_jobs) < MAX_VISION_IMAGES:
                 try:
                     pix = page.get_pixmap(dpi=150)
@@ -199,9 +183,6 @@ def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
                 except Exception as pix_err:
                     print(f"Error rendering pixmap for page {page_num}: {pix_err}")
 
-        # Run all queued vision jobs concurrently instead of sequentially.
-        # This is the main ingestion speedup: N Gemini calls in parallel
-        # instead of N calls back-to-back.
         if vision_jobs:
             with ThreadPoolExecutor(max_workers=min(len(vision_jobs), MAX_VISION_IMAGES)) as executor:
                 future_to_job = {
@@ -228,7 +209,6 @@ def process_pdf_multimodal(file_path: str, filename: str) -> Dict[str, Any]:
                             }
                         ))
 
-        # Filter valid non-empty chunks
         valid_chunks = [c for c in all_documents if c.page_content and c.page_content.strip()]
 
         if not valid_chunks:
@@ -263,7 +243,6 @@ async def root():
 
 @app.post("/ingest", status_code=status.HTTP_202_ACCEPTED)
 async def ingest_pdf_async(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Asynchronous ingestion endpoint returning 202 Accepted instantly for UI responsiveness."""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -291,7 +270,6 @@ async def ingest_pdf_async(background_tasks: BackgroundTasks, file: UploadFile =
 
 @app.get("/ingest/status/{filename}")
 async def get_ingest_status(filename: str):
-    """Query ingestion progress or status for a given document."""
     info = ingestion_status.get(filename)
     if not info:
         return {"status": "not_found", "filename": filename}
@@ -300,7 +278,6 @@ async def get_ingest_status(filename: str):
 
 @app.post("/upload")
 async def upload_pdf_sync(file: UploadFile = File(...)):
-    """Synchronous ingestion endpoint for direct upload flows."""
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
@@ -390,3 +367,9 @@ async def query_documents(request: QueryRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
