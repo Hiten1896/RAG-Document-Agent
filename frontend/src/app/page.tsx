@@ -83,6 +83,19 @@ export default function Home() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
   const [themeReady, setThemeReady] = useState(false);
 
+  const applyTheme = (targetTheme: 'dark' | 'light') => {
+    const root = document.documentElement;
+    if (targetTheme === 'dark') {
+      root.classList.add('dark');
+      root.classList.remove('light');
+      root.setAttribute('data-theme', 'dark');
+    } else {
+      root.classList.remove('dark');
+      root.classList.add('light');
+      root.setAttribute('data-theme', 'light');
+    }
+  };
+
   useEffect(() => {
     let initialTheme: 'dark' | 'light' = 'dark';
     try {
@@ -97,11 +110,7 @@ export default function Home() {
     }
 
     setTheme(initialTheme);
-    if (initialTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    applyTheme(initialTheme);
     setThemeReady(true);
   }, []);
 
@@ -112,12 +121,7 @@ export default function Home() {
     }
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
     setTheme(nextTheme);
-
-    if (nextTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
+    applyTheme(nextTheme);
 
     try {
       localStorage.setItem('docagent_theme', nextTheme);
