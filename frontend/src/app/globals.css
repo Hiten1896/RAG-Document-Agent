@@ -1,8 +1,8 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-/* CSS Override Rules for Seamless Dark/Light Switching */
+/* Class-based dark mode for Tailwind v4 */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   color-scheme: light;
 }
@@ -12,15 +12,14 @@ html[data-theme='dark'] {
   color-scheme: dark;
 }
 
-/* Light theme overrides */
-html:not(.dark) body {
-  background-color: #f8fafc !important;
-  color: #0f172a !important;
+body {
+  background-color: #f8fafc;
+  color: #0f172a;
+  transition: background-color 0.2s ease, color 0.2s ease;
 }
 
-/* Dark theme overrides */
 html.dark body,
 html[data-theme='dark'] body {
-  background-color: #020617 !important;
-  color: #f8fafc !important;
+  background-color: #020617;
+  color: #f8fafc;
 }
