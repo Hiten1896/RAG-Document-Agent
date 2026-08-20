@@ -50,7 +50,7 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'agent',
-      text: 'Hello! Upload a PDF to automatically ingest text, diagrams, and figures. Ask me anything about the document!',
+      text: 'Hello! Upload a PDF to automatically ingest text and diagrams. Ask me anything about the document!',
     },
   ]);
 
@@ -135,7 +135,7 @@ export default function Home() {
     setUploadStatus({
       type: 'info',
       message: `Ingesting ${fileToIngest.name}...`,
-      details: 'Extracting text, analyzing charts & diagrams with Gemini Vision...',
+      details: 'Extracting text and generating vector embeddings...',
     });
 
     // Close sidebar on mobile after selecting file
@@ -144,7 +144,7 @@ export default function Home() {
     try {
       const res = await ingestDocument(fileToIngest);
       let attempts = 0;
-      const maxAttempts = 180;
+      const maxAttempts = 60;
 
       const poll = async () => {
         try {
@@ -183,7 +183,7 @@ export default function Home() {
         }
       };
 
-      setTimeout(poll, 1000);
+      setTimeout(poll, 800);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to communicate with backend.';
       setUploadStatus({ type: 'error', message: 'Ingestion error', details: message });
@@ -263,7 +263,7 @@ export default function Home() {
     setMessages([
       {
         sender: 'agent',
-        text: 'Hello! Upload a PDF to automatically ingest text, diagrams, and figures. Ask me anything about the document!',
+        text: 'Hello! Upload a PDF to automatically ingest text and diagrams. Ask me anything about the document!',
       },
     ]);
     setEditingIndex(null);
@@ -319,15 +319,7 @@ export default function Home() {
                 <Bot className="w-6 h-6" />
               </div>
               <div>
-                <div className="flex items-center gap-1.5">
-                  <h1 className="font-bold text-slate-100 text-base tracking-tight">DocAgent RAG</h1>
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                    v2.0
-                  </span>
-                </div>
-                <p className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
-                  <Sparkles className="w-3 h-3 text-amber-400" /> Multi-Modal Gemini + Chroma
-                </p>
+                <h1 className="font-bold text-slate-100 text-base tracking-tight">DocAgent RAG</h1>
               </div>
             </div>
             {/* Close button (mobile only) */}
@@ -437,16 +429,16 @@ export default function Home() {
           {/* Feature list */}
           <div className="p-3.5 rounded-xl bg-slate-900/50 border border-slate-800 space-y-2 text-xs text-slate-400">
             <div className="font-semibold text-slate-300 flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-indigo-400" /> Multi-Modal Features
+              <Layers className="w-3.5 h-3.5 text-indigo-400" /> System Features
             </div>
             <ul className="space-y-1.5 text-[11px]">
               <li className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
-                Text chunking & vector search
+                Fast text chunking & vector search
               </li>
               <li className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />
-                Gemini Vision diagram analysis
+                Gemini LLM response synthesis
               </li>
               <li className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-violet-400 shrink-0" />
@@ -514,11 +506,11 @@ export default function Home() {
                 <Sparkles className="w-10 h-10 sm:w-12 sm:h-12 text-indigo-400" />
               </div>
               <h2 className="text-xl sm:text-2xl font-bold text-slate-100 mb-2">
-                Multi-Modal Document Intelligence
+                Document Intelligence
               </h2>
               <p className="text-sm text-slate-400 max-w-md mb-8 leading-relaxed">
-                Upload a PDF document and ask questions about its text, tables, diagrams, and images.
-                Powered by Gemini Vision and vector search.
+                Upload a PDF document and ask questions about its text, tables, and diagrams.
+                Powered by Gemini and vector search.
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-lg">
                 <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-400">
@@ -670,7 +662,7 @@ export default function Home() {
               <div className="bg-slate-900/80 border border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl flex items-center gap-2.5 text-xs text-slate-300">
                 <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
                 <span className="hidden sm:inline">
-                  Retrieving multi-modal document chunks & generating answer with Gemini...
+                  Retrieving document chunks & generating answer with Gemini...
                 </span>
                 <span className="sm:hidden">Generating answer...</span>
               </div>
