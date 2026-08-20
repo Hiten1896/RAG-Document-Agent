@@ -41,7 +41,7 @@ ingestion_status: Dict[str, Dict[str, Any]] = {}
 
 # Initialize Gemini Vector Search Embeddings (Lightweight for 512MB RAM)
 # Change this line:
-embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004")
+embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001")
 vector_store = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
 
 # Initialize Gemini LLM
