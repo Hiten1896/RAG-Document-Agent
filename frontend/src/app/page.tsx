@@ -1057,11 +1057,10 @@ export default function Home() {
       >
         <div className={`flex flex-col justify-between h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
         <div className="space-y-5 overflow-y-auto flex-1 min-w-[260px]">
-          {/* Identity — logo + name centered as its own block, so it reads
-              as the app's mark rather than a header bar with buttons stuck
-              on the end of it. */}
-          <div className="flex flex-col items-center text-center pt-1">
-            <DocAgentMark className="w-10 h-10 shrink-0 mb-2" />
+          {/* Identity — logo and name side by side as one unit, that unit
+              centered in the sidebar (not stacked/centered separately). */}
+          <div className="flex items-center justify-center gap-3 pt-1">
+            <DocAgentMark className="w-9 h-9 shrink-0" />
             <h1 className="font-bold text-slate-900 dark:text-slate-100 text-base tracking-tight">
               DocAgent RAG
             </h1>
