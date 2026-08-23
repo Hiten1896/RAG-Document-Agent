@@ -21,6 +21,8 @@ import {
   Sun,
   Moon,
   Plus,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 
 /* ───── Types ───── */
@@ -134,6 +136,178 @@ function getErrorMessage(err: unknown, fallback: string): string {
     }
   }
   return fallback;
+}
+
+/* ───── Chat Composer ─────
+   The input row + pending-attachment cards, shared between the centered
+   empty-state layout and the docked bottom layout so both stay in sync
+   automatically. `floating` softens the field into a pill with a visible
+   ring (used when it's the sole focal element on an empty screen); the
+   docked variant keeps the plainer inline style. */
+function ChatComposer({
+  query,
+  setQuery,
+  onSubmit,
+  loading,
+  onTriggerUpload,
+  onMicClick,
+  listening,
+  pendingAttachments,
+  setPendingAttachments,
+  ingestedFiles,
+  handleRetryIngest,
+  floating = false,
+}: {
+  query: string;
+  setQuery: (v: string) => void;
+  onSubmit: (e?: React.FormEvent) => void;
+  loading: boolean;
+  onTriggerUpload: (e?: React.MouseEvent) => void;
+  onMicClick: (e?: React.MouseEvent) => void;
+  listening: boolean;
+  pendingAttachments: string[];
+  setPendingAttachments: React.Dispatch<React.SetStateAction<string[]>>;
+  ingestedFiles: IngestedFile[];
+  handleRetryIngest: (f: IngestedFile) => void;
+  floating?: boolean;
+}) {
+  return (
+    <div>
+      {/* Pending file cards — files uploaded but not yet sent with a query,
+          styled like Claude's own compose-bar attachment card (icon tile,
+          truncated name, type badge). Shows loading/success/failed state
+          right on the card itself instead of a separate popup toast. A
+          failed card shows a Retry button. */}
+      {pendingAttachments.length > 0 && (
+        <div className="flex flex-wrap gap-2.5 mb-3">
+          {pendingAttachments.map((fname, idx) => {
+            const fileInfo = ingestedFiles.find((f) => f.name === fname);
+            const status = fileInfo?.status ?? 'processing';
+            const baseName = fname.replace(/\.pdf$/i, '');
+
+            return (
+              <div
+                key={idx}
+                className={`relative group w-[168px] rounded-xl border p-2.5 shadow-sm transition ${
+                  status === 'failed'
+                    ? 'bg-red-500/5 border-red-500/30'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                }`}
+              >
+                {/* Remove button */}
+                <button
+                  type="button"
+                  onClick={() => setPendingAttachments((prev) => prev.filter((n) => n !== fname))}
+                  className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-slate-700 dark:bg-slate-600 text-white opacity-0 group-hover:opacity-100 transition shadow-md cursor-pointer"
+                  aria-label={`Remove ${fname}`}
+                  title="Remove"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+
+                {/* Icon tile */}
+                <div
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${
+                    status === 'failed'
+                      ? 'bg-red-500/15 text-red-500 dark:text-red-400'
+                      : 'bg-indigo-600/10 text-indigo-600 dark:text-indigo-400'
+                  }`}
+                >
+                  {status === 'processing' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : status === 'failed' ? (
+                    <AlertCircle className="w-4 h-4" />
+                  ) : (
+                    <FileText className="w-4 h-4" />
+                  )}
+                </div>
+
+                {/* Filename */}
+                <p
+                  className="text-xs font-medium text-slate-800 dark:text-slate-200 leading-snug line-clamp-2 break-words"
+                  title={fname}
+                >
+                  {baseName}
+                </p>
+
+                {/* Footer: type badge + status/retry */}
+                <div className="mt-1.5 flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                    PDF
+                  </span>
+                  {status === 'failed' ? (
+                    <button
+                      type="button"
+                      onClick={() => fileInfo && handleRetryIngest(fileInfo)}
+                      className="text-[10px] font-semibold text-red-600 dark:text-red-300 hover:text-red-700 dark:hover:text-red-200 underline decoration-dotted underline-offset-2 cursor-pointer"
+                      title={fileInfo?.error || 'Retry ingestion'}
+                    >
+                      Retry
+                    </button>
+                  ) : status === 'completed' ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <form onSubmit={onSubmit} className="flex gap-2 sm:gap-3">
+        {/* "+" attach button — opens the file picker with `multiple` set, so
+            one or several PDFs can be added right from the message bar
+            without going through the sidebar. */}
+        <button
+          type="button"
+          onClick={onTriggerUpload}
+          className={`bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer ${
+            floating ? 'shadow-sm' : ''
+          }`}
+          aria-label="Add PDF documents"
+          title="Add PDF documents"
+        >
+          <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
+        </button>
+
+        {/* Input field */}
+        <div className="relative flex-1 flex items-center min-w-0">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Ask about text, tables, or diagrams..."
+            className={`w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-11 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 ${
+              floating ? 'shadow-md' : 'shadow-inner'
+            }`}
+            autoFocus={floating}
+          />
+
+          {/* Mic button */}
+          <button
+            type="button"
+            onClick={onMicClick}
+            className={`absolute right-3 p-1.5 rounded-lg transition cursor-pointer z-10 ${
+              listening
+                ? 'bg-red-500 text-white animate-pulse'
+                : 'text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title={listening ? 'Stop listening' : 'Voice input'}
+          >
+            <Mic className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Submit button */}
+        <button
+          type="submit"
+          disabled={loading || !query.trim()}
+          className="bg-gradient-to-tr from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 disabled:from-slate-300 dark:disabled:from-slate-800 disabled:to-slate-300 dark:disabled:to-slate-800 disabled:text-slate-400 dark:disabled:text-slate-600 text-white px-4 sm:px-6 rounded-xl sm:rounded-2xl transition duration-200 flex items-center justify-center shadow-lg shadow-indigo-600/20 font-medium text-sm shrink-0 cursor-pointer disabled:cursor-not-allowed"
+        >
+          <Send className="w-4 h-4" />
+        </button>
+      </form>
+    </div>
+  );
 }
 
 export default function Home() {
@@ -287,8 +461,48 @@ export default function Home() {
 
   /* UI state */
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Desktop sidebar is a separate toggle from the mobile drawer — collapsing
+  // it on desktop removes it from layout flow (width -> 0) rather than
+  // sliding an overlay over the content, matching how Claude's own desktop
+  // sidebar reclaims the space instead of covering it.
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  /* File viewer panel width — user-resizable by dragging the left edge,
+     same idea as Claude's own side panel. Persists only for the session. */
+  const [viewerWidth, setViewerWidth] = useState(440);
+  const viewerResizingRef = useRef(false);
+
+  const startViewerResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    viewerResizingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!viewerResizingRef.current) return;
+      // Panel is on the right edge of the window, so its width is the
+      // distance from the cursor to the right edge of the viewport.
+      const next = window.innerWidth - e.clientX;
+      const clamped = Math.min(Math.max(next, 320), Math.round(window.innerWidth * 0.7));
+      setViewerWidth(clamped);
+    };
+    const onUp = () => {
+      if (!viewerResizingRef.current) return;
+      viewerResizingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
 
   /* Theme state */
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -818,14 +1032,17 @@ export default function Home() {
       <aside
         className={`
           fixed inset-y-0 left-0 z-50 w-[300px] sm:w-[320px]
-          md:static md:w-80 md:z-auto
+          md:static md:z-auto md:shrink-0
           border-r border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 md:bg-white md:dark:bg-slate-900/60
-          backdrop-blur-xl p-5 md:p-6 flex flex-col justify-between shrink-0 shadow-2xl md:shadow-none
+          backdrop-blur-xl flex flex-col justify-between shadow-2xl md:shadow-none
           transition-transform duration-250 ease-out
+          md:transition-[width,margin] md:duration-200 md:ease-out md:overflow-hidden
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+          ${desktopSidebarOpen ? 'md:w-80' : 'md:w-0 md:border-r-0'}
         `}
       >
-        <div className="space-y-5 overflow-y-auto flex-1">
+        <div className={`flex flex-col justify-between h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
+        <div className="space-y-5 overflow-y-auto flex-1 min-w-[260px]">
           {/* Logo + Actions */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -846,6 +1063,18 @@ export default function Home() {
                 title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               >
                 {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
+              </button>
+
+              {/* Collapse — desktop only; mobile uses the X below via the
+                  overlay drawer instead. */}
+              <button
+                type="button"
+                onClick={() => setDesktopSidebarOpen(false)}
+                className="hidden md:inline-flex p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+                aria-label="Collapse sidebar"
+                title="Collapse sidebar"
+              >
+                <PanelLeftClose className="w-4 h-4" />
               </button>
 
               <button
@@ -903,7 +1132,7 @@ export default function Home() {
         </div>
 
         {/* Backend Status Footer */}
-        <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between">
+        <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px]">
           <span>Backend Pipeline:</span>
           {backendOnline === null ? (
             <span className="inline-flex items-center gap-1.5 text-slate-500 dark:text-slate-400 font-medium">
@@ -921,7 +1150,23 @@ export default function Home() {
             </span>
           )}
         </div>
+        </div>
       </aside>
+
+      {/* Floating expand control — shown only once the desktop sidebar is
+          collapsed, fixed to the left edge like Claude's own collapsed-rail
+          toggle rather than living inside the now-hidden sidebar. */}
+      {!desktopSidebarOpen && (
+        <button
+          type="button"
+          onClick={() => setDesktopSidebarOpen(true)}
+          className="hidden md:inline-flex fixed top-5 left-5 z-40 p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 shadow-sm transition cursor-pointer"
+          aria-label="Expand sidebar"
+          title="Expand sidebar"
+        >
+          <PanelLeftOpen className="w-4 h-4" />
+        </button>
+      )}
 
       {/* ═══════════ MAIN CONTENT ═══════════ */}
       <main
@@ -968,24 +1213,48 @@ export default function Home() {
         </div>
 
         {/* ── Chat messages area ── */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6">
+        <div className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}>
 
           {/* Empty state hero — a quiet, personal welcome rather than a
               feature-card grid. The greeting varies with time of day, the
               same small touch Claude's own apps use to make a cold-start
-              screen feel present rather than templated. */}
+              screen feel present rather than templated. The composer lives
+              right here (not docked to the window bottom) so the whole
+              greeting+input block sits centered together, the way a brand
+              new Claude chat opens. */}
           {isEmptyChat && !loading && (
-            <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12 sm:py-20">
+            <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12">
               <DocAgentMark className="w-14 h-14 sm:w-16 sm:h-16 mb-6" />
               <h2 className="text-2xl sm:text-3xl font-semibold text-slate-900 dark:text-slate-100 mb-3 tracking-tight">
                 {greeting}
               </h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed">
+              <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
                 Drop in a PDF, or just ask a question — I&apos;ll pull it from the documents you&apos;ve shared.
               </p>
+              <div className="w-full max-w-2xl px-4">
+                <ChatComposer
+                  query={query}
+                  setQuery={setQuery}
+                  onSubmit={handleSendQuery}
+                  loading={loading}
+                  onTriggerUpload={handleTriggerUpload}
+                  onMicClick={handleMicClick}
+                  listening={listening}
+                  pendingAttachments={pendingAttachments}
+                  setPendingAttachments={setPendingAttachments}
+                  ingestedFiles={ingestedFiles}
+                  handleRetryIngest={handleRetryIngest}
+                  floating
+                />
+                <p className="text-center text-[11px] text-slate-400 dark:text-slate-600 mt-3">
+                  Made by HS
+                </p>
+              </div>
             </div>
           )}
 
+          {!isEmptyChat && (
+          <>
           {/* Messages */}
           {messages.map((msg, index) => {
             const isUser = msg.sender === 'user';
@@ -1179,147 +1448,57 @@ export default function Home() {
           )}
 
           <div ref={messagesEndRef} />
-        </div>
-
-        {/* ── Chat Input ── */}
-        <div className="p-3 sm:p-4 lg:p-6 border-t border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/40 backdrop-blur-xl shrink-0">
-          {/* Pending file cards — files uploaded but not yet sent with a
-              query, styled like Claude's own compose-bar attachment card
-              (icon tile, truncated name, type badge). Shows loading/success/
-              failed state right on the card itself instead of a separate
-              popup toast. A failed card shows a Retry button. */}
-          {pendingAttachments.length > 0 && (
-            <div className="flex flex-wrap gap-2.5 max-w-4xl mx-auto mb-3">
-              {pendingAttachments.map((fname, idx) => {
-                const fileInfo = ingestedFiles.find((f) => f.name === fname);
-                const status = fileInfo?.status ?? 'processing';
-                const baseName = fname.replace(/\.pdf$/i, '');
-
-                return (
-                  <div
-                    key={idx}
-                    className={`relative group w-[168px] rounded-xl border p-2.5 shadow-sm transition ${
-                      status === 'failed'
-                        ? 'bg-red-500/5 border-red-500/30'
-                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
-                    }`}
-                  >
-                    {/* Remove button */}
-                    <button
-                      type="button"
-                      onClick={() => setPendingAttachments((prev) => prev.filter((n) => n !== fname))}
-                      className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-slate-700 dark:bg-slate-600 text-white opacity-0 group-hover:opacity-100 transition shadow-md cursor-pointer"
-                      aria-label={`Remove ${fname}`}
-                      title="Remove"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-
-                    {/* Icon tile */}
-                    <div
-                      className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${
-                        status === 'failed'
-                          ? 'bg-red-500/15 text-red-500 dark:text-red-400'
-                          : status === 'completed'
-                          ? 'bg-indigo-600/10 text-indigo-600 dark:text-indigo-400'
-                          : 'bg-indigo-600/10 text-indigo-600 dark:text-indigo-400'
-                      }`}
-                    >
-                      {status === 'processing' ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : status === 'failed' ? (
-                        <AlertCircle className="w-4 h-4" />
-                      ) : (
-                        <FileText className="w-4 h-4" />
-                      )}
-                    </div>
-
-                    {/* Filename */}
-                    <p
-                      className="text-xs font-medium text-slate-800 dark:text-slate-200 leading-snug line-clamp-2 break-words"
-                      title={fname}
-                    >
-                      {baseName}
-                    </p>
-
-                    {/* Footer: type badge + status/retry */}
-                    <div className="mt-1.5 flex items-center justify-between gap-1.5">
-                      <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                        PDF
-                      </span>
-                      {status === 'failed' ? (
-                        <button
-                          type="button"
-                          onClick={() => fileInfo && handleRetryIngest(fileInfo)}
-                          className="text-[10px] font-semibold text-red-600 dark:text-red-300 hover:text-red-700 dark:hover:text-red-200 underline decoration-dotted underline-offset-2 cursor-pointer"
-                          title={fileInfo?.error || 'Retry ingestion'}
-                        >
-                          Retry
-                        </button>
-                      ) : status === 'completed' ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+          </>
           )}
-          <form onSubmit={handleSendQuery} className="flex gap-2 sm:gap-3 max-w-4xl mx-auto">
-            {/* "+" attach button — opens the file picker with `multiple` set,
-                so one or several PDFs can be added right from the message
-                bar without going through the sidebar. Visible on every
-                screen size (previously this was mobile-only). */}
-            <button
-              type="button"
-              onClick={handleTriggerUpload}
-              className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer"
-              aria-label="Add PDF documents"
-              title="Add PDF documents"
-            >
-              <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-
-            {/* Input field */}
-            <div className="relative flex-1 flex items-center min-w-0">
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Ask about text, tables, or diagrams..."
-                className="w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-11 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 shadow-inner"
-              />
-
-              {/* Mic button */}
-              <button
-                type="button"
-                onClick={handleMicClick}
-                className={`absolute right-3 p-1.5 rounded-lg transition cursor-pointer z-10 ${
-                  listening
-                    ? 'bg-red-500 text-white animate-pulse'
-                    : 'text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800'
-                }`}
-                title={listening ? 'Stop listening' : 'Voice input'}
-              >
-                <Mic className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Submit button */}
-            <button
-              type="submit"
-              disabled={loading || !query.trim()}
-              className="bg-gradient-to-tr from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 disabled:from-slate-300 dark:disabled:from-slate-800 disabled:to-slate-300 dark:disabled:to-slate-800 disabled:text-slate-400 dark:disabled:text-slate-600 text-white px-4 sm:px-6 rounded-xl sm:rounded-2xl transition duration-200 flex items-center justify-center shadow-lg shadow-indigo-600/20 font-medium text-sm shrink-0 cursor-pointer disabled:cursor-not-allowed"
-            >
-              <Send className="w-4 h-4" />
-            </button>
-          </form>
         </div>
+
+        {/* ── Chat Input — docked at the bottom once a conversation has
+            started. Borderless/floating (no top divider, no bar-spanning
+            background) so it reads as a composer sitting in the chat rather
+            than a fixed toolbar underneath it. */}
+        {!isEmptyChat && (
+          <div className="px-3 sm:px-4 lg:px-6 pb-3 sm:pb-4 lg:pb-5 pt-2 shrink-0">
+            <div className="max-w-4xl mx-auto">
+              <ChatComposer
+                query={query}
+                setQuery={setQuery}
+                onSubmit={handleSendQuery}
+                loading={loading}
+                onTriggerUpload={handleTriggerUpload}
+                onMicClick={handleMicClick}
+                listening={listening}
+                pendingAttachments={pendingAttachments}
+                setPendingAttachments={setPendingAttachments}
+                ingestedFiles={ingestedFiles}
+                handleRetryIngest={handleRetryIngest}
+              />
+            </div>
+            <p className="text-center text-[11px] text-slate-400 dark:text-slate-600 mt-2.5">
+              Made by HS
+            </p>
+          </div>
+        )}
       </main>
 
       {/* ═══════════ FILE VIEWER PANEL ═══════════ */}
       {viewerFile && (
-        <aside className="hidden md:flex flex-col w-[420px] lg:w-[480px] shrink-0 border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in">
+        <aside
+          className="hidden md:flex flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
+          style={{ width: viewerWidth }}
+        >
+          {/* Drag handle — grabbing the left edge resizes the panel, same
+              interaction as Claude's own side panel. A slightly wider
+              invisible hit-area sits over the visible 1px border so it's
+              actually easy to grab. */}
+          <div
+            onMouseDown={startViewerResize}
+            className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize file viewer"
+          >
+            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+          </div>
           <div className="flex items-center justify-between gap-3 px-4 py-3.5 border-b border-slate-200 dark:border-slate-800/80 shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
