@@ -322,6 +322,22 @@ class QueryResponse(BaseModel):
     sources: List[SourceMetadata]
 
 
+class TitleRequest(BaseModel):
+    """A single user message to summarize into a short chat title."""
+
+    message: str = ""
+
+    @model_validator(mode="after")
+    def _require_non_empty(self) -> "TitleRequest":
+        if not self.message.strip():
+            raise ValueError("Provide a non-empty 'message'.")
+        return self
+
+
+class TitleResponse(BaseModel):
+    title: str
+
+
 # ── Helpers ──
 _UNSAFE_FILENAME_CHARS = re.compile(r'[\x00-\x1f<>:"/\\|?*]')
 
@@ -661,6 +677,51 @@ def check_status(filename: str):
     if _already_indexed(filename):
         return {"status": "completed", "filename": filename}
     return {"status": "not_found", "filename": filename}
+
+
+@app.post("/title", response_model=TitleResponse)
+def generate_title(payload: TitleRequest):
+    """Summarize a user's first message into a short chat-history title.
+
+    Deliberately separate from /query: this needs no document retrieval, so
+    it skips the vector store and Jina embeddings entirely and only spends
+    one small Gemini call (same GEMINI_API_KEY /query already uses) — the
+    RAG pipeline's LLM, reused for a much cheaper job than answering a
+    question over document context.
+    """
+    message = payload.message.strip()
+
+    prompt = f"""Summarize the following chat message into a short title for a
+chat history list, similar to how ChatGPT or Claude name conversations.
+
+Rules:
+- 2 to 6 words.
+- No quotation marks, no trailing punctuation.
+- Plain title case, no markdown.
+- Capture the topic, not the literal phrasing of a question.
+
+Message:
+{message}
+
+Title:"""
+
+    try:
+        response = llm.invoke(prompt)
+        title = _coerce_answer(response).strip().strip('"').strip("'")
+        # Guard against the model ignoring the length instruction — a title
+        # this UI truncates anyway shouldn't be allowed to explode into a
+        # full sentence in the sidebar.
+        if len(title) > 60:
+            title = title[:60].rstrip() + "…"
+        if not title:
+            raise ValueError("empty title")
+        return TitleResponse(title=title)
+    except Exception:
+        # Titling is a nicety, not core functionality — never let it 500 and
+        # break sending a message. Frontend falls back to truncating the
+        # message itself if this endpoint fails for any reason.
+        logger.exception("Title generation failed; frontend will fall back to truncation.")
+        raise HTTPException(status_code=503, detail="Title generation unavailable.")
 
 
 @app.post("/query", response_model=QueryResponse)

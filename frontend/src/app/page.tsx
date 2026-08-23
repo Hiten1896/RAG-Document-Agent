@@ -47,6 +47,10 @@ interface Conversation {
   id: string;
   title: string;
   messages: Message[];
+  // True once the AI-generated title (via /title) has landed, so a later
+  // message in the same chat doesn't re-trigger titling — only the very
+  // first user message per conversation gets one.
+  titleGenerated?: boolean;
 }
 
 const WELCOME_MESSAGE: Message = {
@@ -63,6 +67,29 @@ function makeConversationId(): string {
 function titleFromQuery(text: string): string {
   const trimmed = text.trim();
   return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
+}
+
+// Asks the backend to summarize the first message into a short title using
+// the same Gemini LLM /query already relies on (GEMINI_API_KEY), rather than
+// just truncating the raw question text. Falls back to null on any failure
+// so the caller can keep the truncated title already showing — a slow or
+// failed title call should never block or disrupt sending a message.
+async function generateChatTitle(message: string): Promise<string | null> {
+  const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+  try {
+    const res = await fetch(`${API}/title`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const title = typeof data?.title === 'string' ? data.title.trim() : '';
+    return title || null;
+  } catch {
+    return null;
+  }
 }
 
 function getErrorMessage(err: unknown, fallback: string): string {
@@ -102,8 +129,10 @@ export default function Home() {
     conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
   const messages = activeConversation.messages;
 
-  // Update only the active conversation's message list, auto-titling it from
-  // the first user message the same way most chat UIs do.
+  // Update only the active conversation's message list. Auto-titling here is
+  // just the instant fallback (truncated question text) so the sidebar has
+  // something to show immediately; requestAiTitle (below) upgrades it to a
+  // proper AI-generated title once that call resolves.
   const setMessagesForActive = useCallback(
     (updater: (prev: Message[]) => Message[]) => {
       setConversations((prev) =>
@@ -112,13 +141,33 @@ export default function Home() {
           const nextMessages = updater(c.messages);
           const firstUserMsg = nextMessages.find((m) => m.sender === 'user');
           const nextTitle =
-            c.title === 'New Chat' && firstUserMsg ? titleFromQuery(firstUserMsg.text) : c.title;
+            c.title === 'New Chat' && firstUserMsg && !c.titleGenerated
+              ? titleFromQuery(firstUserMsg.text)
+              : c.title;
           return { ...c, messages: nextMessages, title: nextTitle };
         })
       );
     },
     [activeConversationId]
   );
+
+  // Fires the /title call in the background for a conversation's first
+  // message and patches that conversation's title by id once it resolves —
+  // by id rather than "whichever chat is active", since the user may have
+  // already switched to a different conversation before the network call
+  // returns. No-ops once a conversation already has an AI title, so editing
+  // a later message never re-titles the chat.
+  const requestAiTitle = useCallback(async (conversationId: string, firstMessage: string) => {
+    const aiTitle = await generateChatTitle(firstMessage);
+    if (!aiTitle) return; // fall back stays as the truncated text — fine either way
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === conversationId && !c.titleGenerated
+          ? { ...c, title: aiTitle, titleGenerated: true }
+          : c
+      )
+    );
+  }, []);
 
   /* Files uploaded but not yet sent with a query — shown as chips above the
      input, then attached to the next user message once sent (mirrors how
@@ -553,6 +602,15 @@ export default function Home() {
 
     const userText = query.trim();
     const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
+    // Captured before the async gap below — the active conversation could
+    // change while this request is in flight, and the title patch must land
+    // on the conversation the message was actually sent in, not whichever
+    // one happens to be active when the network call resolves.
+    const targetConversationId = activeConversationId;
+    const isFirstUserMessage =
+      !activeConversation.titleGenerated &&
+      !activeConversation.messages.some((m) => m.sender === 'user');
+
     setQuery('');
     setPendingAttachments([]);
     setMessagesForActive((prev) => [
@@ -560,6 +618,13 @@ export default function Home() {
       { sender: 'user', text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
     ]);
     setLoading(true);
+
+    if (isFirstUserMessage) {
+      // Fire-and-forget: runs alongside the actual query rather than
+      // blocking it, since generating a title has no bearing on getting an
+      // answer back.
+      requestAiTitle(targetConversationId, userText);
+    }
 
     try {
       // No `source` filter is passed, so the backend searches across every
@@ -595,6 +660,12 @@ export default function Home() {
     if (!editText.trim() || loading) return;
 
     const updatedQuery = editText.trim();
+    const targetConversationId = activeConversationId;
+    // Editing the very first user message changes what the chat is "about",
+    // so it's worth re-titling. Editing a later message leaves the existing
+    // title alone — only messages[0] being a user message identifies it as
+    // the first one, since index 0 is always the welcome agent message.
+    const isEditingFirstUserMessage = targetIndex === 1;
     setEditingIndex(null);
     setEditText('');
 
@@ -603,6 +674,13 @@ export default function Home() {
       sliced.push({ sender: 'user', text: updatedQuery });
       return sliced;
     });
+
+    if (isEditingFirstUserMessage) {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === targetConversationId ? { ...c, titleGenerated: false } : c))
+      );
+      requestAiTitle(targetConversationId, updatedQuery);
+    }
 
     setLoading(true);
     try {
