@@ -551,12 +551,6 @@ export default function Home() {
   const [renameText, setRenameText] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
 
-  /* Which conversation is pending a delete confirmation — Claude's app
-     doesn't delete on the first click, it asks first. Tracked separately
-     from `openMenuId` so the confirmation can replace the menu in place
-     rather than stacking a second popover. */
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
-
   useEffect(() => {
     if (!openMenuId) return;
     const onClickAway = (e: MouseEvent) => {
@@ -571,12 +565,10 @@ export default function Home() {
       if (chatMenuRef.current?.contains(target)) return;
       if ((target as HTMLElement).closest?.('[data-chat-menu-trigger]')) return;
       setOpenMenuId(null);
-      setConfirmingDeleteId(null);
     };
     const onEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setOpenMenuId(null);
-        setConfirmingDeleteId(null);
       }
     };
     // Use 'click' instead of 'mousedown' so this fires *after* React's own
@@ -1187,7 +1179,6 @@ export default function Home() {
     setRenamingId(null);
     setRenameText('');
     setOpenMenuId(null);
-    setConfirmingDeleteId(null);
   };
 
   const handleSwitchConversation = (id: string) => {
@@ -1199,7 +1190,6 @@ export default function Home() {
     setRenamingId(null);
     setRenameText('');
     setOpenMenuId(null);
-    setConfirmingDeleteId(null);
   };
 
   /* Delete a conversation from the sidebar. If the deleted chat was the
@@ -1222,7 +1212,6 @@ export default function Home() {
       return next;
     });
     setOpenMenuId(null);
-    setConfirmingDeleteId(null);
     // Deleting the active conversation while a message in it is mid-edit
     // must clear that edit state too — otherwise `editingIndex` keeps
     // pointing at an index into the *new* active conversation's (unrelated)
@@ -1240,7 +1229,6 @@ export default function Home() {
      rename flow rather than leaving both open at once. */
   const handleStartRename = (id: string, currentTitle: string) => {
     setOpenMenuId(null);
-    setConfirmingDeleteId(null);
     setRenamingId(id);
     setRenameText(currentTitle);
   };
@@ -1323,7 +1311,6 @@ export default function Home() {
             // silently persist behind it and reappear mid-animation the
             // next time the drawer opens.
             setOpenMenuId(null);
-            setConfirmingDeleteId(null);
             setRenamingId(null);
             setRenameText('');
           }}
@@ -1389,7 +1376,6 @@ export default function Home() {
               onClick={() => {
                 setSidebarOpen(false);
                 setOpenMenuId(null);
-                setConfirmingDeleteId(null);
                 setRenamingId(null);
                 setRenameText('');
               }}
@@ -1438,7 +1424,6 @@ export default function Home() {
           <div className="space-y-1 pr-0.5 overflow-y-auto flex-1 min-h-0">
             {conversations.map((c) => {
               const isRenaming = renamingId === c.id;
-              const isConfirmingDelete = confirmingDeleteId === c.id;
 
                 return (
                 <div key={c.id} className="relative group">
@@ -1496,7 +1481,6 @@ export default function Home() {
                       onClick={(e) => {
                         e.stopPropagation();
                         setOpenMenuId((prev) => (prev === c.id ? null : c.id));
-                        setConfirmingDeleteId(null);
                       }}
                       className={`absolute right-1 top-1/2 -translate-y-1/2 p-1.5 md:p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
                         openMenuId === c.id
@@ -1521,70 +1505,32 @@ export default function Home() {
                     <div
                       ref={chatMenuRef}
                       role="menu"
-                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-48 md:w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
+                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
                     >
-                      {isConfirmingDelete ? (
-                        /* ── Delete confirmation — replaces the menu's
-                            contents in place rather than opening a second
-                            popover or a modal, so it's still a one-click
-                            reach but no longer a single accidental click
-                            away from losing a chat, matching how Claude's
-                            own app asks before deleting. */
-                        <div className="px-3 py-2">
-                          <p className="text-xs text-slate-600 dark:text-slate-300 mb-2 leading-snug">
-                            Delete this chat?
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteConversation(c.id);
-                              }}
-                              className="flex-1 px-2 py-1.5 md:py-1 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-medium transition cursor-pointer"
-                            >
-                              Delete
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setConfirmingDeleteId(null);
-                              }}
-                              className="flex-1 px-2 py-1.5 md:py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-medium transition cursor-pointer"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </div>
-                      ) : (
-                        <>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleStartRename(c.id, c.title);
-                            }}
-                            className="w-full flex items-center gap-2 px-3 py-2.5 md:py-1.5 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                            Rename
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setConfirmingDeleteId(c.id);
-                            }}
-                            className="w-full flex items-center gap-2 px-3 py-2.5 md:py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            Delete
-                          </button>
-                        </>
-                      )}
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartRename(c.id, c.title);
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2.5 md:py-1.5 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteConversation(c.id);
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2.5 md:py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </button>
                     </div>
                   )}
                 </div>
