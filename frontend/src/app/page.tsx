@@ -7,13 +7,11 @@ import {
   Send,
   FileText,
   Bot,
-  User,
   Loader2,
   CheckCircle2,
   AlertCircle,
   Edit3,
   X,
-  Check,
   Image as ImageIcon,
   Sparkles,
   Menu,
@@ -127,6 +125,69 @@ export default function Home() {
      the Claude app shows an upload attached to the message you send after
      it, and leaves messages sent without an upload unaffected). */
   const [pendingAttachments, setPendingAttachments] = useState<string[]>([]);
+
+  /* Right-side file viewer panel — opened by clicking an attached file chip
+     or a source citation card. Renders the PDF the browser already has in
+     memory (the File object kept on the matching ingestedFiles entry), via
+     an object URL, so no extra backend call is needed to view it.
+
+     Page jump: appending `#page=N` to the object URL is honored by Chrome/
+     Edge/Firefox's built-in PDF viewer and scrolls straight to that page.
+     True in-PDF text highlighting isn't something a plain <iframe> can be
+     told to do from outside the document, so instead a small banner shows
+     which page the citation came from — the closest equivalent achievable
+     without shipping a full PDF.js-based custom renderer. */
+  const [viewerFile, setViewerFile] = useState<string | null>(null);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [viewerPage, setViewerPage] = useState<number | null>(null);
+
+  const openFileViewer = useCallback(
+    (fname: string, page?: number) => {
+      const match = ingestedFiles.find((f) => f.name === fname && f.file);
+      if (!match?.file) return;
+      const url = URL.createObjectURL(match.file);
+      setViewerUrl((prevUrl) => {
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        return url;
+      });
+      setViewerFile(fname);
+      setViewerPage(page ?? null);
+    },
+    [ingestedFiles]
+  );
+
+  const closeFileViewer = useCallback(() => {
+    setViewerFile(null);
+    setViewerPage(null);
+    setViewerUrl((prevUrl) => {
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      return null;
+    });
+  }, []);
+
+  // Release the object URL when the component unmounts so the blob isn't
+  // held in memory after the panel is gone for good.
+  useEffect(() => {
+    return () => {
+      setViewerUrl((prevUrl) => {
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        return prevUrl;
+      });
+    };
+  }, []);
+
+  // Lock body scroll while the mobile full-screen viewer sheet is open, the
+  // same way Claude's mobile app prevents the page behind a sheet from
+  // scrolling.
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (!viewerFile) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [viewerFile]);
 
   /* Chat state */
   const [query, setQuery] = useState('');
@@ -837,50 +898,36 @@ export default function Home() {
             return (
               <div
                 key={index}
-                className={`group flex items-start gap-2.5 sm:gap-4 ${
-                  isUser ? 'flex-row-reverse' : 'flex-row'
-                }`}
+                className={`group flex items-start ${isUser ? 'justify-end' : 'justify-start'}`}
               >
-                {/* Avatar */}
-                <div
-                  className={`p-2 sm:p-2.5 rounded-xl shrink-0 shadow-md ${
-                    isUser
-                      ? 'bg-gradient-to-tr from-indigo-600 to-indigo-500 text-white'
-                      : 'bg-white dark:bg-slate-900 text-indigo-600 dark:text-indigo-400 border border-slate-200 dark:border-slate-800'
-                  }`}
-                >
-                  {isUser ? (
-                    <User className="w-4 h-4 sm:w-5 sm:h-5" />
-                  ) : (
-                    <Bot className="w-4 h-4 sm:w-5 sm:h-5" />
-                  )}
-                </div>
 
                 {/* Bubble */}
                 <div className={`max-w-[85%] sm:max-w-3xl flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
                   {isUser && isEditing ? (
-                    /* ── Inline Edit Form ── */
-                    <div className="w-full min-w-0 max-w-xl bg-white dark:bg-slate-900 border border-indigo-500/50 rounded-2xl p-3 shadow-xl space-y-3">
+                    /* ── Inline Edit — replaces the bubble content in place,
+                       same shape/width as a normal user bubble, rather than
+                       a separate boxed card below it. */
+                    <div className="w-full min-w-0 bg-indigo-600 rounded-2xl rounded-tr-none p-3.5 sm:p-4 shadow-sm space-y-2.5">
                       <textarea
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
-                        className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl p-3 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 resize-y min-h-[70px]"
+                        className="w-full bg-white/10 border border-white/20 rounded-lg p-2.5 text-sm text-white placeholder-white/50 focus:outline-none focus:border-white/40 resize-y min-h-[60px]"
                         autoFocus
                       />
                       <div className="flex justify-end gap-2 text-xs">
                         <button
                           type="button"
                           onClick={handleCancelEdit}
-                          className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition flex items-center gap-1 cursor-pointer"
+                          className="px-3 py-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition cursor-pointer"
                         >
-                          <X className="w-3.5 h-3.5" /> Cancel
+                          Cancel
                         </button>
                         <button
                           type="button"
                           onClick={() => handleSaveEdit(index)}
-                          className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition flex items-center gap-1 shadow-md shadow-indigo-600/30 cursor-pointer"
+                          className="px-3.5 py-1.5 rounded-lg bg-white text-indigo-600 font-medium hover:bg-white/90 transition cursor-pointer"
                         >
-                          <Check className="w-3.5 h-3.5" /> Save & Regenerate
+                          Save
                         </button>
                       </div>
                     </div>
@@ -898,13 +945,16 @@ export default function Home() {
                           {msg.attachedFiles && msg.attachedFiles.length > 0 && (
                             <div className="flex flex-wrap gap-1.5 mb-2">
                               {msg.attachedFiles.map((fname, fIndex) => (
-                                <span
+                                <button
                                   key={fIndex}
-                                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 border border-white/20 text-[11px] sm:text-xs font-medium text-white"
+                                  type="button"
+                                  onClick={() => openFileViewer(fname)}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 border border-white/20 text-[11px] sm:text-xs font-medium text-white hover:bg-white/25 transition cursor-pointer"
+                                  title={`Open ${fname}`}
                                 >
                                   <FileText className="w-3.5 h-3.5 shrink-0" />
                                   <span className="truncate max-w-[160px] sm:max-w-[220px]">{fname}</span>
-                                </span>
+                                </button>
                               ))}
                             </div>
                           )}
@@ -967,15 +1017,22 @@ export default function Home() {
                               const isVisual = src.chunk_type === 'visual';
                               const pageText = src.page ? `Page ${src.page}` : '';
                               const sourceName = src.source || 'Document';
+                              const canOpen = ingestedFiles.some((f) => f.name === sourceName && f.file);
 
                               return (
-                                <span
+                                <button
                                   key={srcIndex}
+                                  type="button"
+                                  onClick={() => canOpen && openFileViewer(sourceName, src.page)}
+                                  disabled={!canOpen}
                                   className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs font-mono transition shadow-sm ${
+                                    !canOpen ? 'cursor-default opacity-90' : 'cursor-pointer hover:shadow-md hover:-translate-y-px'
+                                  } ${
                                     isVisual
                                       ? 'bg-violet-50 dark:bg-violet-950/40 border-violet-200 dark:border-violet-500/40 text-violet-700 dark:text-violet-300'
                                       : 'bg-slate-100 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700/80 text-indigo-700 dark:text-indigo-300'
                                   }`}
+                                  title={canOpen ? `Open ${sourceName} at ${pageText || 'page 1'}` : sourceName}
                                 >
                                   {isVisual ? (
                                     <ImageIcon className="w-3 h-3 text-violet-600 dark:text-violet-400 shrink-0" />
@@ -986,7 +1043,7 @@ export default function Home() {
                                     {sourceName}
                                   </span>
                                   {pageText && <span className="opacity-75">({pageText})</span>}
-                                </span>
+                                </button>
                               );
                             })}
                           </div>
@@ -1000,10 +1057,10 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => handleStartEdit(index, msg.text)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1.5 text-xs text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-300 flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-slate-200/50 dark:hover:bg-slate-800/50 cursor-pointer"
+                      className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1 text-xs text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 flex items-center gap-1 px-1 py-0.5 cursor-pointer"
                       title="Edit this query and regenerate response"
                     >
-                      <Edit3 className="w-3 h-3" /> Edit query
+                      <Edit3 className="w-3 h-3" /> Edit
                     </button>
                   )}
                 </div>
@@ -1013,11 +1070,8 @@ export default function Home() {
 
           {/* Loading Indicator */}
           {loading && (
-            <div className="flex items-center gap-2.5 sm:gap-3 text-slate-500 dark:text-slate-400 text-sm">
-              <div className="p-2 sm:p-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-indigo-600 dark:text-indigo-400">
-                <Bot className="w-4 h-4 sm:w-5 sm:h-5" />
-              </div>
-              <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 shadow-sm">
+            <div className="flex items-center text-slate-500 dark:text-slate-400 text-sm">
+              <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl rounded-tl-none flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 shadow-sm">
                 <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
                 <span className="hidden sm:inline">
                   Retrieving document chunks & generating answer with Gemini...
@@ -1165,6 +1219,115 @@ export default function Home() {
           </form>
         </div>
       </main>
+
+      {/* ═══════════ FILE VIEWER PANEL ═══════════ */}
+      {viewerFile && (
+        <aside className="hidden md:flex flex-col w-[420px] lg:w-[480px] shrink-0 border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in">
+          <div className="flex items-center justify-between gap-3 px-4 py-3.5 border-b border-slate-200 dark:border-slate-800/80 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate" title={viewerFile}>
+                {viewerFile}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={closeFileViewer}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition shrink-0 cursor-pointer"
+              aria-label="Close file viewer"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Citation banner — a plain <iframe>'s native PDF viewer can be
+              told which page to jump to (via the URL hash below) but not
+              told to highlight text inside the document itself, so this
+              banner names the cited page as the closest achievable stand-in. */}
+          {viewerPage && (
+            <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+              <Search className="w-3.5 h-3.5 shrink-0" />
+              <span>Cited from page {viewerPage} — jumped there below.</span>
+            </div>
+          )}
+
+          <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
+            {viewerUrl ? (
+              <iframe
+                key={`${viewerUrl}#page=${viewerPage ?? 1}`}
+                src={viewerPage ? `${viewerUrl}#page=${viewerPage}` : viewerUrl}
+                title={viewerFile}
+                className="w-full h-full border-0"
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
+                Couldn&apos;t load this file for preview.
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
+
+      {/* Mobile File Viewer — a bottom sheet rather than a side panel,
+          matching how Claude's mobile app surfaces attachments: slides up
+          over the chat, rounded top corners, drag-handle affordance, and a
+          compact header instead of a full desktop chrome bar. */}
+      {viewerFile && (
+        <div className="md:hidden fixed inset-0 z-[70] flex flex-col justify-end">
+          <style>{`
+            @keyframes slide-up {
+              from { transform: translateY(100%); }
+              to { transform: translateY(0); }
+            }
+          `}</style>
+          <div
+            className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm animate-fade-in"
+            onClick={closeFileViewer}
+          />
+          <div className="relative flex flex-col bg-white dark:bg-slate-950 rounded-t-2xl shadow-2xl h-[92vh] overflow-hidden animate-[slide-up_0.25s_ease-out]">
+            {/* Drag handle */}
+            <div className="flex justify-center pt-2.5 pb-1 shrink-0">
+              <div className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 px-4 pb-3 pt-1 border-b border-slate-200 dark:border-slate-800/80 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate" title={viewerFile}>
+                  {viewerFile}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={closeFileViewer}
+                className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition shrink-0 cursor-pointer"
+                aria-label="Close file viewer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {viewerPage && (
+              <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+                <Search className="w-3.5 h-3.5 shrink-0" />
+                <span>Cited from page {viewerPage} — jumped there below.</span>
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-900">
+              {viewerUrl && (
+                <iframe
+                  key={`${viewerUrl}#page=${viewerPage ?? 1}`}
+                  src={viewerPage ? `${viewerUrl}#page=${viewerPage}` : viewerUrl}
+                  title={viewerFile}
+                  className="w-full h-full border-0"
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

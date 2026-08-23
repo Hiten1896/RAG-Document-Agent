@@ -197,6 +197,29 @@ vectorstore = Chroma(
     embedding_function=embeddings,
 )
 
+# ── Reset vector store on every startup ──
+# Chroma persists to disk across restarts, but the frontend's chat history
+# and this file's own `ingestion_jobs` tracker are in-memory and reset on
+# every launch. That mismatch made documents "silently" accumulate across
+# dev restarts — re-uploading the same PDF during testing just kept adding
+# duplicate embeddings on top of old ones, growing the collection forever.
+# Wiping the collection here means every server start begins from a clean,
+# empty index, matching the fresh chat history the frontend already shows.
+# Set CLEAR_CHROMA_ON_STARTUP=false in .env to opt out (e.g. in production,
+# where documents should persist across deploys/restarts).
+if os.getenv("CLEAR_CHROMA_ON_STARTUP", "true").strip().lower() not in ("false", "0", "no"):
+    try:
+        vectorstore.delete_collection()
+    except Exception:
+        # Nothing to delete yet (first-ever run) — safe to ignore.
+        pass
+    vectorstore = Chroma(
+        collection_name=COLLECTION_NAME,
+        persist_directory=str(PERSIST_DIR),
+        embedding_function=embeddings,
+    )
+    logger.info("Cleared Chroma collection %r on startup.", COLLECTION_NAME)
+
 llm = ChatGoogleGenerativeAI(
     model=LLM_MODEL,
     google_api_key=GEMINI_API_KEY,
