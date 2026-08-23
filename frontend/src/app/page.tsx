@@ -1058,15 +1058,16 @@ export default function Home() {
               <button
                 type="button"
                 onClick={toggleTheme}
-                className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700/80 text-slate-600 dark:text-slate-300 transition duration-200 cursor-pointer"
+                className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
                 aria-label="Toggle theme"
                 title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               >
-                {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
 
               {/* Collapse — desktop only; mobile uses the X below via the
-                  overlay drawer instead. */}
+                  overlay drawer instead. Same base style as the theme
+                  toggle above so both read at equal visual weight. */}
               <button
                 type="button"
                 onClick={() => setDesktopSidebarOpen(false)}
