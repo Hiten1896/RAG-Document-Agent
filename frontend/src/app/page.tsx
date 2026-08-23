@@ -23,6 +23,8 @@ import {
   Plus,
   PanelLeftClose,
   PanelLeftOpen,
+  MoreHorizontal,
+  Trash2,
 } from 'lucide-react';
 
 /* ───── Types ───── */
@@ -448,28 +450,38 @@ export default function Home() {
      render of it and no mismatch.
 
      Four real periods (morning / afternoon / evening / night), each with
-     a small pool of headline + subtext pairs so the screen doesn't say
-     the exact same line on every visit within that window. */
+     five headline + subtext pairs. Picked in a fixed round-robin order
+     (not random) so consecutive visits within the same period never repeat
+     the same line back-to-back — the next index per period is remembered
+     in localStorage across reloads/sessions. */
   const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
     morning: [
       { headline: 'Good morning.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
       { headline: 'Morning. Ready when you are.', subtext: 'Upload a document or ask about one already shared, and I\u2019ll dig in.' },
       { headline: 'Rise and shine.', subtext: 'Bring a PDF, or ask about the ones already here — text, tables, or diagrams.' },
+      { headline: 'Morning. Let\u2019s get into it.', subtext: 'Share a document to start, or ask about one you\u2019ve already uploaded.' },
+      { headline: 'Good morning — first thing on the list?', subtext: 'Drop in a PDF, or ask about text, tables, or diagrams within one.' },
     ],
     afternoon: [
       { headline: 'Good afternoon.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
       { headline: 'Afternoon. What are we digging into?', subtext: 'Share a document or pick up where an earlier one left off.' },
       { headline: 'Good afternoon — what can I help with?', subtext: 'Text, tables, diagrams — ask about anything you\u2019ve shared.' },
+      { headline: 'Afternoon. Ready when you are.', subtext: 'Upload a PDF, or ask about one that\u2019s already here.' },
+      { headline: 'Good afternoon — let\u2019s take a look.', subtext: 'Drop in a document and I\u2019ll help you work through it.' },
     ],
     evening: [
       { headline: 'Good evening.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
       { headline: 'Evening. What can I help with?', subtext: 'Upload something new or ask about a document already on hand.' },
       { headline: 'Good evening — let\u2019s take a look.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
+      { headline: 'Evening. Ready when you are.', subtext: 'Drop in a document to get started, or pick up an earlier one.' },
+      { headline: 'Good evening — what\u2019s on the list?', subtext: 'Share a PDF and I\u2019ll help you get through it.' },
     ],
     night: [
       { headline: 'Still up? What can I help with?', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
       { headline: 'Working late?', subtext: 'Share a document and I\u2019ll help you get through it.' },
       { headline: 'Burning the midnight oil.', subtext: 'Upload a PDF or ask about one already shared — I\u2019m here.' },
+      { headline: 'Late one, huh?', subtext: 'Drop in a document, or ask about one you\u2019ve already shared.' },
+      { headline: 'Still up. Let\u2019s make it count.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
     ],
   };
 
@@ -484,7 +496,25 @@ export default function Home() {
     const period: keyof typeof GREETINGS =
       hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
     const pool = GREETINGS[period];
-    const pick = pool[Math.floor(Math.random() * pool.length)];
+
+    // Sequential, not random: read the last-used index for this period from
+    // localStorage, advance it by one (wrapping around), and persist it —
+    // so the very next visit during the same period is guaranteed to be a
+    // different line, cycling through all five before any repeat.
+    const storageKey = `docagent_greeting_idx_${period}`;
+    let nextIndex = 0;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      const parsed = stored !== null ? parseInt(stored, 10) : -1;
+      nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
+      window.localStorage.setItem(storageKey, String(nextIndex));
+    } catch {
+      // localStorage unavailable (private browsing, etc.) — fall back to
+      // the first line in the period rather than breaking the greeting.
+      nextIndex = 0;
+    }
+
+    const pick = pool[nextIndex];
     setGreeting(pick.headline);
     setGreetingSubtext(pick.subtext);
   }, []);
@@ -504,6 +534,29 @@ export default function Home() {
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [dragOver, setDragOver] = useState(false);
+
+  /* Which chat-history item's overflow menu (⋯ → Delete) is open — only one
+     at a time. Closed by picking an action, clicking elsewhere, or Escape. */
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const chatMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const onClickAway = (e: MouseEvent) => {
+      if (chatMenuRef.current && !chatMenuRef.current.contains(e.target as Node)) {
+        setOpenMenuId(null);
+      }
+    };
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenuId(null);
+    };
+    document.addEventListener('mousedown', onClickAway);
+    document.addEventListener('keydown', onEscape);
+    return () => {
+      document.removeEventListener('mousedown', onClickAway);
+      document.removeEventListener('keydown', onEscape);
+    };
+  }, [openMenuId]);
 
   /* File viewer panel width — user-resizable by dragging the left edge,
      same idea as Claude's own side panel. Persists only for the session.
@@ -1029,6 +1082,27 @@ export default function Home() {
     setQuery('');
   };
 
+  /* Delete a conversation from the sidebar. If the deleted chat was the
+     active one, falls back to whichever chat is now first in the list —
+     or, if that was the last chat left, opens a fresh "New Chat" instead
+     of leaving the UI with no conversation selected at all. */
+  const handleDeleteConversation = (id: string) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      if (id === activeConversationId) {
+        if (next.length > 0) {
+          setActiveConversationId(next[0].id);
+        } else {
+          const fresh: Conversation = { id: makeConversationId(), title: 'New Chat', messages: [] };
+          setActiveConversationId(fresh.id);
+          return [fresh];
+        }
+      }
+      return next;
+    });
+    setOpenMenuId(null);
+  };
+
   /* Source dedup */
   const getDeduplicatedSources = (sources: SourceMetadata[] = []) => {
     const seen = new Set<string>();
@@ -1155,29 +1229,72 @@ export default function Home() {
 
           {/* Chat History — session-only: lives in memory for this tab and
               is intentionally lost on reload, same as the rest of the app's
-              state. Not persisted to storage. */}
+              state. Not persisted to storage. Each row reveals a ⋯ menu on
+              hover (always visible on touch) with a Delete action, same
+              pattern as Claude's own chat list. */}
           <div className="space-y-2">
             <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
               Chat History
             </label>
             <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
               {conversations.map((c) => (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => {
-                    handleSwitchConversation(c.id);
-                    setSidebarOpen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
-                    c.id === activeConversationId
-                      ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
-                  }`}
-                  title={c.title}
-                >
-                  {c.title}
-                </button>
+                <div key={c.id} className="relative group">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleSwitchConversation(c.id);
+                      setSidebarOpen(false);
+                    }}
+                    className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
+                      c.id === activeConversationId
+                        ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
+                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
+                    }`}
+                    title={c.title}
+                  >
+                    {c.title}
+                  </button>
+
+                  {/* ⋯ trigger — quiet until the row is hovered/focused or
+                      its menu is the one currently open, matching Claude's
+                      own restrained per-row affordance. */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenMenuId((prev) => (prev === c.id ? null : c.id));
+                    }}
+                    className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
+                      openMenuId === c.id ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+                    }`}
+                    aria-label={`More options for ${c.title}`}
+                    aria-haspopup="menu"
+                    aria-expanded={openMenuId === c.id}
+                  >
+                    <MoreHorizontal className="w-3.5 h-3.5" />
+                  </button>
+
+                  {openMenuId === c.id && (
+                    <div
+                      ref={chatMenuRef}
+                      role="menu"
+                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteConversation(c.id);
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
               ))}
             </div>
           </div>
