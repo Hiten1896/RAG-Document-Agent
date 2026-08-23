@@ -25,6 +25,9 @@ import {
   PanelLeftOpen,
   MoreHorizontal,
   Trash2,
+  Pencil,
+  Check,
+  RefreshCw,
 } from 'lucide-react';
 
 /* ───── Types ───── */
@@ -535,28 +538,83 @@ export default function Home() {
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  /* Which chat-history item's overflow menu (⋯ → Delete) is open — only one
-     at a time. Closed by picking an action, clicking elsewhere, or Escape. */
+  /* Which chat-history item's overflow menu (⋯ → Delete/Rename) is open —
+     only one at a time. Closed by picking an action, clicking elsewhere, or
+     Escape. */
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const chatMenuRef = useRef<HTMLDivElement>(null);
+
+  /* Inline rename — which conversation's title is being edited in the
+     sidebar, and the draft text for it. Only one row can be renaming at a
+     time, same restriction as the overflow menu itself. */
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState('');
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  /* Which conversation is pending a delete confirmation — Claude's app
+     doesn't delete on the first click, it asks first. Tracked separately
+     from `openMenuId` so the confirmation can replace the menu in place
+     rather than stacking a second popover. */
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!openMenuId) return;
     const onClickAway = (e: MouseEvent) => {
-      if (chatMenuRef.current && !chatMenuRef.current.contains(e.target as Node)) {
-        setOpenMenuId(null);
-      }
+      // Ignore clicks on the trigger button too, not just the menu panel.
+      // Without this, this same document-level handler (attached the
+      // instant the menu opens) can catch a click on a *different* row's
+      // ⋯ button and close the current menu before that button's own
+      // onClick runs — so the second click just closes without opening
+      // the new one, making delete feel like it "doesn't work" until a
+      // third click.
+      const target = e.target as Node;
+      if (chatMenuRef.current?.contains(target)) return;
+      if ((target as HTMLElement).closest?.('[data-chat-menu-trigger]')) return;
+      setOpenMenuId(null);
+      setConfirmingDeleteId(null);
     };
     const onEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpenMenuId(null);
+      if (e.key === 'Escape') {
+        setOpenMenuId(null);
+        setConfirmingDeleteId(null);
+      }
     };
-    document.addEventListener('mousedown', onClickAway);
+    // Use 'click' instead of 'mousedown' so this fires *after* React's own
+    // onClick handlers (e.g. the Delete button's) have already run — a
+    // mousedown listener can beat React's click-based state update in some
+    // browsers/timing scenarios, closing the menu before delete registers.
+    document.addEventListener('click', onClickAway);
     document.addEventListener('keydown', onEscape);
     return () => {
-      document.removeEventListener('mousedown', onClickAway);
+      document.removeEventListener('click', onClickAway);
       document.removeEventListener('keydown', onEscape);
     };
   }, [openMenuId]);
+
+  // Renaming has its own Escape/outside-commit behavior (Escape cancels,
+  // blur/outside-click saves) rather than reusing the menu's click-away
+  // handler, since the rename input isn't inside `chatMenuRef` — the menu
+  // is already closed by the time renaming starts.
+  useEffect(() => {
+    if (!renamingId) return;
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setRenamingId(null);
+        setRenameText('');
+      }
+    };
+    document.addEventListener('keydown', onEscape);
+    return () => document.removeEventListener('keydown', onEscape);
+  }, [renamingId]);
+
+  // Autofocus + select-all the moment the rename input mounts, so typing
+  // immediately replaces the existing title rather than appending to it.
+  useEffect(() => {
+    if (renamingId && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renamingId]);
 
   /* File viewer panel width — user-resizable by dragging the left edge,
      same idea as Claude's own side panel. Persists only for the session.
@@ -1021,9 +1079,10 @@ export default function Home() {
     const targetConversationId = activeConversationId;
     // Editing the very first user message changes what the chat is "about",
     // so it's worth re-titling. Editing a later message leaves the existing
-    // title alone — only messages[0] being a user message identifies it as
-    // the first one, since index 0 is always the welcome agent message.
-    const isEditingFirstUserMessage = targetIndex === 1;
+    // title alone. There's no synthetic welcome message in `messages` — the
+    // very first user message is always at index 0 — so that's the check,
+    // not index 1 (which would never match and silently skip re-titling).
+    const isEditingFirstUserMessage = targetIndex === 0;
     setEditingIndex(null);
     setEditText('');
 
@@ -1058,6 +1117,59 @@ export default function Home() {
     }
   };
 
+  /* Regenerate — re-runs the last user question in place, replacing only
+     the assistant's answer to it (same question, fresh answer), rather
+     than the edit flow above which changes the question itself. Only ever
+     targets the *last* exchange: regenerating an answer in the middle of
+     the conversation would orphan every message that came after it, so
+     that's intentionally not offered (mirrors the same last-turn-only
+     restriction Claude's own app applies). */
+  const handleRegenerateResponse = async () => {
+    if (loading) return;
+    // Walk back from the end to find the most recent user message — this is
+    // always the second-to-last entry in a well-formed transcript (user,
+    // then agent), but re-deriving it by scanning is robust even if an
+    // error message or a future message type breaks that assumption.
+    let lastUserIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].sender === 'user') {
+        lastUserIndex = i;
+        break;
+      }
+    }
+    if (lastUserIndex === -1) return;
+    const questionText = messages[lastUserIndex].text;
+    const targetConversationId = activeConversationId;
+
+    // Drop everything after the last user message (i.e. the stale answer,
+    // plus anything that somehow followed it) and regenerate fresh — the
+    // question bubble itself stays untouched.
+    setMessagesForActive((prev) => prev.slice(0, lastUserIndex + 1));
+    setLoading(true);
+    try {
+      const res = await queryDocument(questionText);
+      setMessagesForActive((prev) => {
+        // Guard against the conversation having been switched away from
+        // and back, or otherwise changed shape, while this request was in
+        // flight — only append if we're still looking at the same point in
+        // the transcript this regenerate was actually requested from.
+        if (activeConversationId !== targetConversationId) return prev;
+        return [
+          ...prev,
+          { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+        ];
+      });
+    } catch (err: unknown) {
+      const message = getErrorMessage(err, 'Unknown error');
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'agent', text: `Error regenerating answer: ${message}` },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   /* New Chat — starts a fresh conversation and adds it to the sidebar
      history list, rather than wiping the current one. History is session-only
      by design: it lives in component state and is gone on reload. */
@@ -1072,6 +1184,10 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
     setQuery('');
+    setRenamingId(null);
+    setRenameText('');
+    setOpenMenuId(null);
+    setConfirmingDeleteId(null);
   };
 
   const handleSwitchConversation = (id: string) => {
@@ -1080,6 +1196,10 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
     setQuery('');
+    setRenamingId(null);
+    setRenameText('');
+    setOpenMenuId(null);
+    setConfirmingDeleteId(null);
   };
 
   /* Delete a conversation from the sidebar. If the deleted chat was the
@@ -1087,6 +1207,7 @@ export default function Home() {
      or, if that was the last chat left, opens a fresh "New Chat" instead
      of leaving the UI with no conversation selected at all. */
   const handleDeleteConversation = (id: string) => {
+    const deletingActive = id === activeConversationId;
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id);
       if (id === activeConversationId) {
@@ -1101,6 +1222,48 @@ export default function Home() {
       return next;
     });
     setOpenMenuId(null);
+    setConfirmingDeleteId(null);
+    // Deleting the active conversation while a message in it is mid-edit
+    // must clear that edit state too — otherwise `editingIndex` keeps
+    // pointing at an index into the *new* active conversation's (unrelated)
+    // messages array, which can silently put the wrong message into edit
+    // mode or point past the end of the array.
+    if (deletingActive) {
+      setEditingIndex(null);
+      setEditText('');
+    }
+  };
+
+  /* Rename — starts editing a conversation's title inline in the sidebar.
+     Opened from the ⋯ menu; the menu itself closes immediately so the row
+     switches straight from menu to text field, matching Claude's own
+     rename flow rather than leaving both open at once. */
+  const handleStartRename = (id: string, currentTitle: string) => {
+    setOpenMenuId(null);
+    setConfirmingDeleteId(null);
+    setRenamingId(id);
+    setRenameText(currentTitle);
+  };
+
+  const handleCancelRename = () => {
+    setRenamingId(null);
+    setRenameText('');
+  };
+
+  const handleCommitRename = (id: string) => {
+    const trimmed = renameText.trim();
+    setRenamingId(null);
+    setRenameText('');
+    if (!trimmed) return; // empty rename is treated as a cancel, not "New Chat"
+    setConversations((prev) =>
+      prev.map((c) =>
+        // A manual rename is a deliberate override, so it should stick the
+        // same way an AI-generated title does — later messages must not
+        // silently overwrite it. Reusing `titleGenerated` for this piggy-
+        // backs on the exact guard `setMessagesForActive` already checks.
+        c.id === id ? { ...c, title: trimmed, titleGenerated: true } : c
+      )
+    );
   };
 
   /* Source dedup */
@@ -1117,7 +1280,12 @@ export default function Home() {
     return result;
   };
 
-  const isEmptyChat = messages.length === 0;
+  // `loading` is included so a request in flight always keeps the
+  // message-list layout (with its spinner) mounted, even if `messages` is
+  // momentarily empty — e.g. switching away from a conversation whose
+  // request hasn't resolved yet. Without this, the hero/hero-composer and
+  // the docked composer + spinner could both fail to render at once.
+  const isEmptyChat = messages.length === 0 && !loading;
 
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
@@ -1237,67 +1405,155 @@ export default function Home() {
               Chat History
             </label>
             <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
-              {conversations.map((c) => (
+              {conversations.map((c) => {
+                const isRenaming = renamingId === c.id;
+                const isConfirmingDelete = confirmingDeleteId === c.id;
+
+                return (
                 <div key={c.id} className="relative group">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handleSwitchConversation(c.id);
-                      setSidebarOpen(false);
-                    }}
-                    className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
-                      c.id === activeConversationId
-                        ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
-                        : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
-                    }`}
-                    title={c.title}
-                  >
-                    {c.title}
-                  </button>
+                  {isRenaming ? (
+                    /* ── Inline rename — swaps the row's button out for a
+                        text field in place, same width/position, so the
+                        row doesn't jump around when renaming starts. */
+                    <input
+                      ref={renameInputRef}
+                      type="text"
+                      value={renameText}
+                      onChange={(e) => setRenameText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleCommitRename(c.id);
+                        }
+                        // Escape is handled globally, but stop it bubbling
+                        // so it can't also trigger some other Escape
+                        // listener (e.g. closing the mobile sidebar) at
+                        // the same time as canceling the rename.
+                        if (e.key === 'Escape') e.stopPropagation();
+                      }}
+                      onBlur={() => handleCommitRename(c.id)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="w-full pl-3 pr-8 py-2 rounded-lg text-xs bg-white dark:bg-slate-900 border border-indigo-500/60 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleSwitchConversation(c.id);
+                        setSidebarOpen(false);
+                      }}
+                      className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
+                        c.id === activeConversationId
+                          ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
+                          : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
+                      }`}
+                      title={c.title}
+                    >
+                      {c.title}
+                    </button>
+                  )}
 
                   {/* ⋯ trigger — quiet until the row is hovered/focused or
                       its menu is the one currently open, matching Claude's
-                      own restrained per-row affordance. */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setOpenMenuId((prev) => (prev === c.id ? null : c.id));
-                    }}
-                    className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
-                      openMenuId === c.id ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
-                    }`}
-                    aria-label={`More options for ${c.title}`}
-                    aria-haspopup="menu"
-                    aria-expanded={openMenuId === c.id}
-                  >
-                    <MoreHorizontal className="w-3.5 h-3.5" />
-                  </button>
+                      own restrained per-row affordance. Hidden entirely
+                      while renaming, since Enter/blur/Escape already cover
+                      every way out of that state. */}
+                  {!isRenaming && (
+                    <button
+                      type="button"
+                      data-chat-menu-trigger
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuId((prev) => (prev === c.id ? null : c.id));
+                        setConfirmingDeleteId(null);
+                      }}
+                      className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
+                        openMenuId === c.id ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+                      }`}
+                      aria-label={`More options for ${c.title}`}
+                      aria-haspopup="menu"
+                      aria-expanded={openMenuId === c.id}
+                    >
+                      <MoreHorizontal className="w-3.5 h-3.5" />
+                    </button>
+                  )}
 
                   {openMenuId === c.id && (
                     <div
                       ref={chatMenuRef}
                       role="menu"
-                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
+                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
                     >
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeleteConversation(c.id);
-                        }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        Delete
-                      </button>
+                      {isConfirmingDelete ? (
+                        /* ── Delete confirmation — replaces the menu's
+                            contents in place rather than opening a second
+                            popover or a modal, so it's still a one-click
+                            reach but no longer a single accidental click
+                            away from losing a chat, matching how Claude's
+                            own app asks before deleting. */
+                        <div className="px-3 py-2">
+                          <p className="text-xs text-slate-600 dark:text-slate-300 mb-2 leading-snug">
+                            Delete this chat?
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteConversation(c.id);
+                              }}
+                              className="flex-1 px-2 py-1 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-medium transition cursor-pointer"
+                            >
+                              Delete
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmingDeleteId(null);
+                              }}
+                              className="flex-1 px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-medium transition cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleStartRename(c.id, c.title);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmingDeleteId(c.id);
+                            }}
+                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Delete
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
-              ))}
+              );
+              })}
             </div>
           </div>
+
 
         </div>
 
@@ -1392,7 +1648,7 @@ export default function Home() {
               right here (not docked to the window bottom) so the whole
               greeting+input block sits centered together, the way a brand
               new Claude chat opens. */}
-          {isEmptyChat && !loading && (
+          {isEmptyChat && (
             <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12">
               <DocAgentMark className="w-14 h-14 sm:w-16 sm:h-16 mb-6" />
               <h2 className="text-2xl sm:text-3xl font-semibold text-slate-900 dark:text-slate-100 mb-3 tracking-tight">
@@ -1597,6 +1853,25 @@ export default function Home() {
                       title="Edit this query and regenerate response"
                     >
                       <Edit3 className="w-3 h-3" /> Edit
+                    </button>
+                  )}
+
+                  {/* Regenerate button — only on the last assistant message,
+                      same restriction Claude's own app applies, since
+                      regenerating an earlier answer would leave every
+                      message after it orphaned/contradicting a rewritten
+                      turn in the middle of the transcript. Hidden while
+                      a request is already in flight rather than disabled,
+                      so it doesn't visually compete with the loading
+                      bubble that appears right below it. */}
+                  {!isUser && index === messages.length - 1 && !loading && (
+                    <button
+                      type="button"
+                      onClick={handleRegenerateResponse}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1 text-xs text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 flex items-center gap-1 px-1 py-0.5 cursor-pointer"
+                      title="Regenerate this response"
+                    >
+                      <RefreshCw className="w-3 h-3" /> Regenerate
                     </button>
                   )}
                 </div>
