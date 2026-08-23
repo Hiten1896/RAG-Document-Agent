@@ -1,11 +1,28 @@
 # Python & Virtual Environment
 venv/
+.venv/
 __pycache__/
 *.pyc
 
+# Node — a stray root-level node_modules got committed because this was missing.
+# NOTE: already-tracked files are not removed by adding a rule here. Run
+#   git rm -r --cached node_modules
+# to stop tracking the 1000+ files currently in the index.
+node_modules/
+
 # Local Vector DB & Temp Files
 chroma_db/
+data/chroma_db/
 temp_*
+
+# Uploaded documents are user data, not source. `.gitkeep` is kept.
+data/uploads/*
+!data/uploads/.gitkeep
 
 # Environment Variables
 .env
+.env.local
+
+# Next.js build output
+.next/
+out/

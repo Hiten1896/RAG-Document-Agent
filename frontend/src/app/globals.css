@@ -1,9 +1,25 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Tailwind v4 is installed (see package.json). v4 replaced the v3
+   `@tailwind base/components/utilities` triple with a single import.
+   Using the old directives here made the whole build fail with
+   "Cannot apply unknown utility class `bg-slate-50`", because the theme
+   was never registered for `@apply` to resolve against. */
+@import "tailwindcss";
 
-/* Smooth background/color defaults */
+/* v4 does NOT auto-load `tailwind.config.js`, so `darkMode: 'class'` from a
+   JS config is silently ignored and `dark:` falls back to the OS setting —
+   which is why the in-app theme toggle had no effect. Declaring the variant
+   here is the v4 way to bind `dark:` to a class on <html>. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Default to the user's system preference so the page is still themed
+   correctly if the pre-hydration script in layout.tsx never runs, then let an
+   explicit choice pin it. This also themes native UI: scrollbars, form
+   controls, and the initial canvas background. */
 :root {
+  color-scheme: light dark;
+}
+
+html.light {
   color-scheme: light;
 }
 
@@ -12,5 +28,22 @@ html.dark {
 }
 
 body {
-  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-200;
+  @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+}
+
+/* Used by the mic-error toast in page.tsx. It referenced `animate-fade-in`,
+   which was never defined, so the toast appeared with no transition. */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
 }

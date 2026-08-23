@@ -1,11 +1,37 @@
-fastapi
-uvicorn
-pymupdf
-chromadb
-langchain
-langchain-community
-langchain-google-genai
-langchain-chroma
-python-dotenv
-pydantic
-python-multipart
+# Pinned to the versions this app is developed and tested against.
+# Previously every entry was unpinned, so a fresh `docker build` could resolve a
+# release with breaking changes and fail at import time, before any route.
+# Regenerate with: pip freeze | grep -iE '<pkg>'
+fastapi==0.141.1
+uvicorn==0.52.4
+python-multipart==0.0.32
+python-dotenv==1.2.3
+pydantic==2.13.4
+
+# RAG pipeline
+langchain==1.3.15
+langchain-text-splitters==1.1.2
+langchain-community==0.4.2
+langchain-google-genai==4.3.4
+langchain-chroma==1.1.0
+chromadb==1.5.9
+
+# Local embeddings (HuggingFace sentence-transformers), keeps ingestion off
+# the Gemini API quota. Gemini above is used only for answer generation.
+langchain-huggingface==1.2.1
+sentence-transformers==5.2.0
+
+# PDF parsing
+pymupdf==1.28.2
+
+# OCR fallback for scanned/handwritten PDF pages (see MIN_CHARS_PER_PAGE in
+# main.py). pytesseract is a thin wrapper — it also requires the Tesseract
+# OCR *binary* installed separately on the machine running the backend;
+# pip alone does not install it:
+#   Windows: https://github.com/UB-Mannheim/tesseract/wiki (installer)
+#   macOS:   brew install tesseract
+#   Linux:   apt install tesseract-ocr
+# If Tesseract isn't installed, the app still starts — OCR is skipped and
+# scanned pages are reported as unreadable instead of crashing ingestion.
+pytesseract==0.3.13
+pillow==12.0.0

@@ -1,5 +1,32 @@
-__pycache__
-.venv
 .git
+.gitignore
+.dockerignore
 .env
+
+# Virtualenvs. The old file only listed `.venv`, but this repo's env is `venv/`,
+# so the entire Windows virtualenv was copied into the Linux image — a huge
+# build context full of unusable platform-specific binaries.
+venv
+.venv
+**/venv
+**/.venv
+
+# The Next.js app is not part of the backend image.
+frontend
+node_modules
+**/node_modules
+package.json
+package-lock.json
+
+__pycache__
+**/__pycache__
+*.pyc
+
+# Data is mounted/created at runtime, not baked into the image.
 data/uploads/*
+data/chroma_db/*
+chroma_db
+
+# Local tooling
+.vscode
+rag_agent_project.ipynb

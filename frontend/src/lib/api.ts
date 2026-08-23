@@ -23,12 +23,39 @@ export interface IngestStatusResponse {
 }
 
 export interface QueryResponse {
-  query: string;
+  // The backend echoes the question back, but treat it as optional so a
+  // response without it doesn't read as a contract violation.
+  query?: string;
   answer: string;
   sources: SourceMetadata[];
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+
+/**
+ * Every fetch here previously had no timeout, so a hung backend left the UI
+ * spinning forever with no way out. Embedding + LLM generation is slow, so the
+ * query budget is generous; status polls are quick and get a short one.
+ */
+const INGEST_TIMEOUT_MS = 120_000;
+const STATUS_TIMEOUT_MS = 10_000;
+const QUERY_TIMEOUT_MS = 90_000;
+
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  // AbortSignal.timeout is Baseline, but guard so a missing implementation
+  // degrades to "no timeout" rather than throwing before the request is sent.
+  return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms)
+    : undefined;
+}
+
+function describeNetworkError(err: unknown, timedOutMessage: string): never {
+  if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+    throw new Error(timedOutMessage);
+  }
+  if (err instanceof Error) throw err;
+  throw new Error('Could not reach the backend. Is the FastAPI server running?');
+}
 
 /**
  * FastAPI's `detail` field is usually a string (HTTPException(detail="...")),
@@ -91,10 +118,16 @@ export async function ingestDocument(file: File): Promise<IngestResponse> {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE_URL}/ingest`, {
-    method: 'POST',
-    body: formData,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/ingest`, {
+      method: 'POST',
+      body: formData,
+      signal: timeoutSignal(INGEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Upload timed out before the backend accepted the file.');
+  }
 
   if (!response.ok) {
     throw await parseErrorResponse(response, 'Failed to initiate document ingestion.');
@@ -104,9 +137,20 @@ export async function ingestDocument(file: File): Promise<IngestResponse> {
 }
 
 export async function checkIngestStatus(filename: string): Promise<IngestStatusResponse> {
-  // Properly handle spaces and special characters in document filenames
+  // Properly handle spaces and special characters in document filenames.
+  // NOTE: the backend route is `/status/{filename}` — this used to request
+  // `/ingest/status/...`, which 404'd on every poll, so ingestion progress was
+  // never reported and the upload UI just silently stopped.
   const encodedFilename = encodeURIComponent(filename);
-  const response = await fetch(`${API_BASE_URL}/ingest/status/${encodedFilename}`);
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/status/${encodedFilename}`, {
+      signal: timeoutSignal(STATUS_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Timed out while checking ingestion status.');
+  }
 
   if (!response.ok) {
     throw await parseErrorResponse(response, 'Failed to fetch document ingestion status.');
@@ -116,16 +160,22 @@ export async function checkIngestStatus(filename: string): Promise<IngestStatusR
 }
 
 export async function queryDocument(query: string, top_k: number = 4): Promise<QueryResponse> {
-  const response = await fetch(`${API_BASE_URL}/query`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      query,
-      top_k,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        top_k,
+      }),
+      signal: timeoutSignal(QUERY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'The query timed out. The document may still be indexing.');
+  }
 
   if (!response.ok) {
     throw await parseErrorResponse(response, 'Failed to query documents.');

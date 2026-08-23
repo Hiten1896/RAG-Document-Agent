@@ -3,7 +3,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { ingestDocument, checkIngestStatus, queryDocument, SourceMetadata } from '@/lib/api';
 import {
-  UploadCloud,
   Send,
   FileText,
   Bot,
@@ -16,7 +15,6 @@ import {
   Check,
   Image as ImageIcon,
   Sparkles,
-  Layers,
   Menu,
   MessageSquarePlus,
   Zap,
@@ -26,6 +24,7 @@ import {
   MicOff,
   Sun,
   Moon,
+  Plus,
 } from 'lucide-react';
 
 /* ───── Types ───── */
@@ -33,6 +32,36 @@ interface Message {
   sender: 'user' | 'agent';
   text: string;
   sources?: SourceMetadata[];
+}
+
+interface IngestedFile {
+  name: string;
+  status: 'processing' | 'completed' | 'failed';
+  pages?: number;
+  chunks?: number;
+  error?: string;
+}
+
+interface Conversation {
+  id: string;
+  title: string;
+  messages: Message[];
+}
+
+const WELCOME_MESSAGE: Message = {
+  sender: 'agent',
+  text: 'Hello! Upload one or more PDFs to automatically ingest text and diagrams. Ask me anything across all of them!',
+};
+
+// Session-only: kept in memory for the tab's lifetime, not persisted to
+// localStorage/sessionStorage, so a reload starts fresh by design.
+function makeConversationId(): string {
+  return `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function titleFromQuery(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
 }
 
 function getErrorMessage(err: unknown, fallback: string): string {
@@ -53,8 +82,8 @@ function getErrorMessage(err: unknown, fallback: string): string {
 }
 
 export default function Home() {
-  /* Upload state */
-  const [file, setFile] = useState<File | null>(null);
+  /* Upload state — multiple files can now be ingested and queried together */
+  const [ingestedFiles, setIngestedFiles] = useState<IngestedFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<{
     type: 'success' | 'error' | 'info';
@@ -62,17 +91,44 @@ export default function Home() {
     details?: string;
   } | null>(null);
 
+  /* Chat history — session-only (kept in memory, never persisted), so a
+     reload intentionally starts clean. Each conversation is independent;
+     switching conversations does not touch ingestedFiles, since documents
+     stay available to every conversation in this session. */
+  const [conversations, setConversations] = useState<Conversation[]>(() => [
+    { id: makeConversationId(), title: 'New Chat', messages: [WELCOME_MESSAGE] },
+  ]);
+  const [activeConversationId, setActiveConversationId] = useState<string>(
+    () => conversations[0].id
+  );
+
+  const activeConversation =
+    conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
+  const messages = activeConversation.messages;
+
+  // Update only the active conversation's message list, auto-titling it from
+  // the first user message the same way most chat UIs do.
+  const setMessagesForActive = useCallback(
+    (updater: (prev: Message[]) => Message[]) => {
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== activeConversationId) return c;
+          const nextMessages = updater(c.messages);
+          const firstUserMsg = nextMessages.find((m) => m.sender === 'user');
+          const nextTitle =
+            c.title === 'New Chat' && firstUserMsg ? titleFromQuery(firstUserMsg.text) : c.title;
+          return { ...c, messages: nextMessages, title: nextTitle };
+        })
+      );
+    },
+    [activeConversationId]
+  );
+
   /* Chat state */
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      sender: 'agent',
-      text: 'Hello! Upload a PDF to automatically ingest text and diagrams. Ask me anything about the document!',
-    },
-  ]);
 
   /* UI state */
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -81,7 +137,6 @@ export default function Home() {
 
   /* Theme state */
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [themeReady, setThemeReady] = useState(false);
 
   const applyTheme = (targetTheme: 'dark' | 'light') => {
     const root = document.documentElement;
@@ -96,22 +151,34 @@ export default function Home() {
     }
   };
 
+  // The inline script in layout.tsx already put the right class on <html> before
+  // first paint. This only syncs React state to that, so the toggle icon matches
+  // what's on screen — it must not re-derive or re-apply the theme, which is
+  // what previously forced the whole app to stay `invisible` until hydration.
   useEffect(() => {
-    let initialTheme: 'dark' | 'light' = 'dark';
-    try {
-      const saved = localStorage.getItem('docagent_theme') as 'dark' | 'light' | null;
-      if (saved === 'dark' || saved === 'light') {
-        initialTheme = saved;
-      } else if (typeof window !== 'undefined' && window.matchMedia) {
-        initialTheme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-      }
-    } catch {
-      // safe fallback
-    }
+    const root = document.documentElement;
+    setTheme(root.classList.contains('light') ? 'light' : 'dark');
+  }, []);
 
-    setTheme(initialTheme);
-    applyTheme(initialTheme);
-    setThemeReady(true);
+  // The OS theme can change while the page is open. Follow it only while the
+  // user has not pinned a choice of their own.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+
+    const media = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = (event: MediaQueryListEvent) => {
+      try {
+        if (localStorage.getItem('docagent_theme')) return; // user pinned a theme
+      } catch {
+        // localStorage unavailable — fall through and follow the system
+      }
+      const next = event.matches ? 'light' : 'dark';
+      setTheme(next);
+      applyTheme(next);
+    };
+
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
   }, []);
 
   const toggleTheme = (e?: React.MouseEvent) => {
@@ -152,6 +219,15 @@ export default function Home() {
     const id = setTimeout(() => setMicError(null), 4000);
     return () => clearTimeout(id);
   }, [micError]);
+
+  // Auto-dismiss success/info upload toasts after a few seconds; errors stay
+  // on screen until the next upload attempt since they carry a diagnostic
+  // message worth reading in full.
+  useEffect(() => {
+    if (!uploadStatus || uploadStatus.type === 'error') return;
+    const id = setTimeout(() => setUploadStatus(null), 5000);
+    return () => clearTimeout(id);
+  }, [uploadStatus]);
 
   const handleMicClick = (e?: React.MouseEvent) => {
     if (e) {
@@ -220,6 +296,17 @@ export default function Home() {
   /* Refs */
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Guards against overlapping ingest poll loops, and lets us cancel the
+  // pending timer on unmount so it can't setState on an unmounted tree.
+  const pollTokenRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      pollTokenRef.current++;
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
+  }, []);
 
   /* Auto-scroll */
   useEffect(() => {
@@ -248,12 +335,18 @@ export default function Home() {
     };
   }, []);
 
-  /* File upload */
+  /* File upload — accepts one or many files. Each file gets its own poll
+     loop keyed by filename, since with multiple files uploading at once a
+     single shared "latest wins" token would cancel earlier ones mid-poll. */
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files?.[0]) {
-      const selectedFile = e.target.files[0];
-      setFile(selectedFile);
-      await triggerAutoIngest(selectedFile);
+    const selectedFiles = Array.from(e.target.files ?? []);
+    // Clear the input's value so re-picking the SAME file(s) fires `change`
+    // again. Without this, a failed ingest could not be retried by
+    // reselecting the file — the browser suppresses the event when the
+    // value is unchanged.
+    e.target.value = '';
+    if (selectedFiles.length) {
+      await ingestMultiple(selectedFiles);
     }
   };
 
@@ -283,76 +376,136 @@ export default function Home() {
     e.stopPropagation();
     setDragOver(false);
 
-    const droppedFile = e.dataTransfer.files?.[0];
-    if (droppedFile) {
-      setFile(droppedFile);
-      await triggerAutoIngest(droppedFile);
+    const droppedFiles = Array.from(e.dataTransfer.files ?? []);
+    if (droppedFiles.length) {
+      await ingestMultiple(droppedFiles);
     }
   }, []);
 
-  /* Ingestion */
-  const triggerAutoIngest = async (fileToIngest: File) => {
-    if (!fileToIngest.name.toLowerCase().endsWith('.pdf')) {
-      setUploadStatus({ type: 'error', message: 'Only PDF documents are supported.' });
-      return;
-    }
+  /* Ingestion — fires all files off in parallel; each tracks its own status
+     entry in ingestedFiles rather than sharing one uploadStatus slot, so
+     one file failing doesn't hide another's progress or overwrite its result. */
+  const ingestMultiple = async (files: File[]) => {
+    const pdfFiles = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+    const rejected = files.length - pdfFiles.length;
 
+    if (rejected > 0) {
+      setUploadStatus({
+        type: rejected === files.length ? 'error' : 'info',
+        message:
+          rejected === files.length
+            ? 'Only PDF documents are supported.'
+            : `Skipped ${rejected} non-PDF file${rejected > 1 ? 's' : ''}.`,
+      });
+    }
+    if (!pdfFiles.length) return;
+
+    setSidebarOpen(false);
     setUploading(true);
     setUploadStatus({
       type: 'info',
-      message: `Ingesting ${fileToIngest.name}...`,
+      message:
+        pdfFiles.length === 1
+          ? `Ingesting ${pdfFiles[0].name}...`
+          : `Ingesting ${pdfFiles.length} files...`,
       details: 'Extracting text and generating vector embeddings...',
     });
 
-    setSidebarOpen(false);
+    await Promise.all(pdfFiles.map((f) => triggerAutoIngest(f)));
+    setUploading(false);
+  };
+
+  const triggerAutoIngest = async (fileToIngest: File) => {
+    const name = fileToIngest.name;
+
+    // Each file's poll loop is invalidated only by a NEW upload of that same
+    // filename (retry), not by other files uploading concurrently.
+    const pollToken = ++pollTokenRef.current;
+    const isStale = () => pollTokenRef.current !== pollToken;
+
+    setIngestedFiles((prev) => [
+      ...prev.filter((f) => f.name !== name),
+      { name, status: 'processing' },
+    ]);
 
     try {
       const res = await ingestDocument(fileToIngest);
+      if (isStale()) return;
+
       let attempts = 0;
       const maxAttempts = 60;
 
       const poll = async () => {
+        if (isStale()) return;
         try {
           const statusRes = await checkIngestStatus(res.filename);
+          if (isStale()) return;
+
           if (statusRes.status === 'completed') {
-            const visualCount = statusRes.visual_chunks || 0;
-            const textCount = statusRes.text_chunks || 0;
+            setIngestedFiles((prev) =>
+              prev.map((f) =>
+                f.name === name
+                  ? { ...f, status: 'completed', pages: statusRes.pages, chunks: statusRes.chunks }
+                  : f
+              )
+            );
             setUploadStatus({
               type: 'success',
-              message: `Successfully indexed ${statusRes.filename}`,
-              details: `${statusRes.pages || 1} pages • ${statusRes.chunks || 0} chunks (${textCount} text, ${visualCount} visual)`,
+              message: `Indexed ${name}`,
+              details: `${statusRes.pages || 1} pages • ${statusRes.chunks || 0} chunks`,
             });
-            setUploading(false);
           } else if (statusRes.status === 'failed') {
+            setIngestedFiles((prev) =>
+              prev.map((f) =>
+                f.name === name ? { ...f, status: 'failed', error: statusRes.error } : f
+              )
+            );
             setUploadStatus({
               type: 'error',
-              message: 'Ingestion failed',
+              message: `Ingestion failed: ${name}`,
               details: statusRes.error || 'Could not parse document.',
             });
-            setUploading(false);
           } else {
+            // `not_found` is also treated as still-pending: the background task
+            // may not have registered the job yet.
             attempts++;
             if (attempts < maxAttempts) {
-              setTimeout(poll, 1000);
+              pollTimerRef.current = setTimeout(poll, 1000);
             } else {
+              setIngestedFiles((prev) =>
+                prev.map((f) =>
+                  f.name === name
+                    ? { ...f, status: 'failed', error: 'Timed out waiting for the backend to finish indexing.' }
+                    : f
+                )
+              );
               setUploadStatus({
                 type: 'info',
-                message: 'Processing is taking longer than expected.',
-                details: 'Vector database is indexing in the background.',
+                message: `${name}: processing is taking longer than expected.`,
+                details: 'Still indexing in the background — check back or retry.',
               });
-              setUploading(false);
             }
           }
-        } catch {
-          setUploading(false);
+        } catch (err: unknown) {
+          // This used to be a bare `catch {}` that only flipped off the spinner,
+          // so a failing status endpoint looked like "nothing happened at all".
+          if (isStale()) return;
+          const message = getErrorMessage(err, 'Could not reach the status endpoint.');
+          setIngestedFiles((prev) =>
+            prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
+          );
+          setUploadStatus({ type: 'error', message: `Lost track of ${name}`, details: message });
         }
       };
 
-      setTimeout(poll, 800);
+      pollTimerRef.current = setTimeout(poll, 800);
     } catch (err: unknown) {
+      if (isStale()) return;
       const message = getErrorMessage(err, 'Failed to communicate with backend.');
-      setUploadStatus({ type: 'error', message: 'Ingestion error', details: message });
-      setUploading(false);
+      setIngestedFiles((prev) =>
+        prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
+      );
+      setUploadStatus({ type: 'error', message: `Ingestion error: ${name}`, details: message });
     }
   };
 
@@ -363,18 +516,20 @@ export default function Home() {
 
     const userText = query.trim();
     setQuery('');
-    setMessages((prev) => [...prev, { sender: 'user', text: userText }]);
+    setMessagesForActive((prev) => [...prev, { sender: 'user', text: userText }]);
     setLoading(true);
 
     try {
+      // No `source` filter is passed, so the backend searches across every
+      // ingested document's chunks rather than restricting to one file.
       const res = await queryDocument(userText);
-      setMessages((prev) => [
+      setMessagesForActive((prev) => [
         ...prev,
         { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
       ]);
     } catch (err: unknown) {
       const message = getErrorMessage(err, 'Unknown error');
-      setMessages((prev) => [
+      setMessagesForActive((prev) => [
         ...prev,
         { sender: 'agent', text: `Error processing your request: ${message}` },
       ]);
@@ -401,20 +556,22 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
 
-    const slicedMessages = messages.slice(0, targetIndex);
-    slicedMessages.push({ sender: 'user', text: updatedQuery });
-    setMessages(slicedMessages);
+    setMessagesForActive((prev) => {
+      const sliced = prev.slice(0, targetIndex);
+      sliced.push({ sender: 'user', text: updatedQuery });
+      return sliced;
+    });
 
     setLoading(true);
     try {
       const res = await queryDocument(updatedQuery);
-      setMessages((prev) => [
+      setMessagesForActive((prev) => [
         ...prev,
         { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
       ]);
     } catch (err: unknown) {
       const message = getErrorMessage(err, 'Unknown error');
-      setMessages((prev) => [
+      setMessagesForActive((prev) => [
         ...prev,
         { sender: 'agent', text: `Error regenerating answer: ${message}` },
       ]);
@@ -423,14 +580,25 @@ export default function Home() {
     }
   };
 
-  /* New Chat */
+  /* New Chat — starts a fresh conversation and adds it to the sidebar
+     history list, rather than wiping the current one. History is session-only
+     by design: it lives in component state and is gone on reload. */
   const handleNewChat = () => {
-    setMessages([
-      {
-        sender: 'agent',
-        text: 'Hello! Upload a PDF to automatically ingest text and diagrams. Ask me anything about the document!',
-      },
-    ]);
+    const newConversation: Conversation = {
+      id: makeConversationId(),
+      title: 'New Chat',
+      messages: [WELCOME_MESSAGE],
+    };
+    setConversations((prev) => [newConversation, ...prev]);
+    setActiveConversationId(newConversation.id);
+    setEditingIndex(null);
+    setEditText('');
+    setQuery('');
+  };
+
+  const handleSwitchConversation = (id: string) => {
+    if (id === activeConversationId) return;
+    setActiveConversationId(id);
     setEditingIndex(null);
     setEditText('');
     setQuery('');
@@ -453,19 +621,20 @@ export default function Home() {
   const isEmptyChat = messages.length <= 1;
 
   return (
-    <div
-      className={`flex h-screen h-[100dvh] bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200 ${
-        themeReady ? '' : 'invisible'
-      }`}
-    >
+    // `h-screen h-[100dvh]` set the same property twice via two utilities, so
+    // which one won depended on Tailwind's output order rather than intent.
+    // `h-dvh` alone is what was wanted: the dynamic viewport height that
+    // accounts for mobile browser chrome.
+    <div className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200">
       {/* Hidden File Input */}
       <input
         ref={fileInputRef}
         type="file"
-        accept=".pdf"
+        accept="application/pdf,.pdf"
         onChange={handleFileChange}
         className="hidden"
         id="file-auto-upload"
+        multiple
       />
 
       {/* Mic Error Toast */}
@@ -473,6 +642,35 @@ export default function Home() {
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-600 dark:text-red-300 text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-center gap-2 animate-fade-in max-w-[90vw]">
           <MicOff className="w-4 h-4 shrink-0" />
           <span className="truncate">{micError}</span>
+        </div>
+      )}
+
+      {/* Upload Status Toast — replaces the sidebar status card now that
+          uploading only happens via the "+" icon in the message bar. Sits
+          just above the input so it's visible without covering the mic toast. */}
+      {uploadStatus && (
+        <div
+          className={`fixed bottom-24 sm:bottom-28 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-start gap-2 animate-fade-in max-w-[92vw] sm:max-w-md border ${
+            uploadStatus.type === 'error'
+              ? 'bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-300'
+              : uploadStatus.type === 'success'
+              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+              : 'bg-indigo-500/10 border-indigo-500/30 text-indigo-700 dark:text-indigo-300'
+          }`}
+        >
+          {uploadStatus.type === 'error' ? (
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          ) : uploadStatus.type === 'success' ? (
+            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+          ) : (
+            <Loader2 className="w-4 h-4 animate-spin shrink-0 mt-0.5" />
+          )}
+          <div className="min-w-0">
+            <div className="truncate">{uploadStatus.message}</div>
+            {uploadStatus.details && (
+              <div className="text-[11px] opacity-80 leading-relaxed">{uploadStatus.details}</div>
+            )}
+          </div>
         </div>
       )}
 
@@ -543,104 +741,35 @@ export default function Home() {
             <MessageSquarePlus className="w-4 h-4 text-indigo-600 dark:text-indigo-400" /> New Chat
           </button>
 
-          {/* Upload Area */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-                Document Ingestion
-              </label>
-              <span className="text-[11px] text-indigo-600 dark:text-indigo-400 font-medium">Auto-Ingest</span>
+          {/* Chat History — session-only: lives in memory for this tab and
+              is intentionally lost on reload, same as the rest of the app's
+              state. Not persisted to storage. */}
+          <div className="space-y-2">
+            <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+              Chat History
+            </label>
+            <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+              {conversations.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => {
+                    handleSwitchConversation(c.id);
+                    setSidebarOpen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
+                    c.id === activeConversationId
+                      ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
+                  }`}
+                  title={c.title}
+                >
+                  {c.title}
+                </button>
+              ))}
             </div>
-
-            <button
-              type="button"
-              onClick={handleTriggerUpload}
-              onDragOver={onDragOver}
-              onDragLeave={onDragLeave}
-              onDrop={onDrop}
-              className={`w-full relative border-2 border-dashed rounded-2xl p-5 text-center transition duration-200 cursor-pointer text-left block ${
-                dragOver
-                  ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/30 scale-[1.02]'
-                  : uploading
-                  ? 'border-indigo-500/60 bg-indigo-50/50 dark:bg-indigo-950/20'
-                  : 'border-slate-300 dark:border-slate-700/70 hover:border-indigo-500/60 bg-slate-50 dark:bg-slate-900/40 hover:bg-slate-100 dark:hover:bg-slate-800/40'
-              }`}
-            >
-              <div className="flex flex-col items-center gap-2.5">
-                {uploading ? (
-                  <div className="relative">
-                    <Loader2 className="w-9 h-9 text-indigo-600 dark:text-indigo-400 animate-spin" />
-                    <Sparkles className="w-3.5 h-3.5 text-amber-500 dark:text-amber-300 absolute -top-1 -right-1 animate-pulse" />
-                  </div>
-                ) : (
-                  <div className="p-3 bg-indigo-100 dark:bg-indigo-600/10 text-indigo-600 dark:text-indigo-400 rounded-xl border border-indigo-200 dark:border-indigo-500/20">
-                    <UploadCloud className="w-7 h-7" />
-                  </div>
-                )}
-
-                <div className="text-center">
-                  <div className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate max-w-[220px]">
-                    {file ? file.name : 'Select or Drop PDF'}
-                  </div>
-                  <div className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                    {uploading ? 'Auto-processing document...' : 'Drag & drop or click to browse'}
-                  </div>
-                </div>
-              </div>
-            </button>
-
-            {/* Status Card */}
-            {uploadStatus && (
-              <div
-                className={`p-3.5 rounded-xl text-xs border transition-all duration-200 ${
-                  uploadStatus.type === 'error'
-                    ? 'bg-red-50 dark:bg-red-500/10 text-red-700 dark:text-red-300 border-red-200 dark:border-red-500/20'
-                    : uploadStatus.type === 'success'
-                    ? 'bg-emerald-50 dark:bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-500/20'
-                    : 'bg-indigo-50 dark:bg-indigo-500/10 text-indigo-700 dark:text-indigo-300 border-indigo-200 dark:border-indigo-500/20'
-                }`}
-              >
-                <div className="flex items-start gap-2.5">
-                  {uploadStatus.type === 'error' ? (
-                    <AlertCircle className="w-4 h-4 text-red-500 dark:text-red-400 shrink-0 mt-0.5" />
-                  ) : uploadStatus.type === 'success' ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-500 dark:text-emerald-400 shrink-0 mt-0.5" />
-                  ) : (
-                    <Loader2 className="w-4 h-4 text-indigo-500 dark:text-indigo-400 animate-spin shrink-0 mt-0.5" />
-                  )}
-                  <div className="space-y-0.5 min-w-0">
-                    <div className="font-medium text-slate-900 dark:text-slate-200 truncate">{uploadStatus.message}</div>
-                    {uploadStatus.details && (
-                      <div className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
-                        {uploadStatus.details}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
 
-          {/* Feature List */}
-          <div className="p-3.5 rounded-xl bg-slate-100 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-800 space-y-2 text-xs text-slate-600 dark:text-slate-400">
-            <div className="font-semibold text-slate-800 dark:text-slate-300 flex items-center gap-1.5">
-              <Layers className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" /> System Features
-            </div>
-            <ul className="space-y-1.5 text-[11px]">
-              <li className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 shrink-0" />
-                Fast text chunking & vector search
-              </li>
-              <li className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 dark:bg-indigo-400 shrink-0" />
-                Gemini LLM response synthesis
-              </li>
-              <li className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-violet-500 dark:bg-violet-400 shrink-0" />
-                Inline query editing & regeneration
-              </li>
-            </ul>
-          </div>
         </div>
 
         {/* Backend Status Footer */}
@@ -665,7 +794,22 @@ export default function Home() {
       </aside>
 
       {/* ═══════════ MAIN CONTENT ═══════════ */}
-      <main className="flex-1 flex flex-col justify-between bg-slate-50 dark:bg-slate-950 overflow-hidden relative min-w-0">
+      <main
+        className="flex-1 flex flex-col justify-between bg-slate-50 dark:bg-slate-950 overflow-hidden relative min-w-0"
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {/* Drag-over overlay — dropping a PDF anywhere in the chat area
+            uploads it, now that the sidebar drop zone is gone. */}
+        {dragOver && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-indigo-50/90 dark:bg-indigo-950/80 border-4 border-dashed border-indigo-500 rounded-none pointer-events-none">
+            <div className="flex flex-col items-center gap-2 text-indigo-700 dark:text-indigo-300">
+              <FileUp className="w-10 h-10" />
+              <span className="font-medium text-sm">Drop PDF(s) to ingest</span>
+            </div>
+          </div>
+        )}
 
         {/* Desktop Top Header Bar */}
         <header className="hidden md:flex items-center justify-between px-6 py-3.5 border-b border-slate-200 dark:border-slate-800/80 bg-white/70 dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
@@ -675,29 +819,10 @@ export default function Home() {
             </span>
             <span className="text-slate-300 dark:text-slate-700">•</span>
             <span className="text-xs font-medium text-indigo-600 dark:text-indigo-400">
-              {file ? file.name : 'No active document'}
+              {ingestedFiles.length
+                ? `${ingestedFiles.length} document${ingestedFiles.length > 1 ? 's' : ''} loaded`
+                : 'No active documents'}
             </span>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 transition duration-200 cursor-pointer"
-              title="Toggle theme"
-            >
-              {theme === 'dark' ? (
-                <>
-                  <Sun className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Light Mode</span>
-                </>
-              ) : (
-                <>
-                  <Moon className="w-3.5 h-3.5 text-indigo-600" />
-                  <span>Dark Mode</span>
-                </>
-              )}
-            </button>
           </div>
         </header>
 
@@ -718,14 +843,6 @@ export default function Home() {
             <span className="font-semibold text-sm text-slate-900 dark:text-slate-200">DocAgent</span>
           </div>
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition cursor-pointer"
-              aria-label="Toggle theme"
-            >
-              {theme === 'dark' ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
-            </button>
             <button
               type="button"
               onClick={handleNewChat}
@@ -923,14 +1040,18 @@ export default function Home() {
         {/* ── Chat Input ── */}
         <div className="p-3 sm:p-4 lg:p-6 border-t border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/40 backdrop-blur-xl shrink-0">
           <form onSubmit={handleSendQuery} className="flex gap-2 sm:gap-3 max-w-4xl mx-auto">
-            {/* Mobile upload toggle */}
+            {/* "+" attach button — opens the file picker with `multiple` set,
+                so one or several PDFs can be added right from the message
+                bar without going through the sidebar. Visible on every
+                screen size (previously this was mobile-only). */}
             <button
               type="button"
               onClick={handleTriggerUpload}
-              className="md:hidden bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer"
-              aria-label="Upload document"
+              className="bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer"
+              aria-label="Add PDF documents"
+              title="Add PDF documents"
             >
-              <FileUp className="w-4 h-4 sm:w-5 sm:h-5" />
+              <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
             </button>
 
             {/* Input field */}
