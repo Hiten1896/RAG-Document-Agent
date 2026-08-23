@@ -470,7 +470,11 @@ export default function Home() {
   const [dragOver, setDragOver] = useState(false);
 
   /* File viewer panel width — user-resizable by dragging the left edge,
-     same idea as Claude's own side panel. Persists only for the session. */
+     same idea as Claude's own side panel. Persists only for the session.
+     Dragging below MIN_VIEWER_WIDTH closes the panel outright (like
+     dragging a native panel shut) instead of getting stuck at a floor. */
+  const MIN_VIEWER_WIDTH = 320;
+  const CLOSE_DRAG_THRESHOLD = 220; // drag narrower than this to dismiss
   const [viewerWidth, setViewerWidth] = useState(440);
   const viewerResizingRef = useRef(false);
 
@@ -487,14 +491,24 @@ export default function Home() {
       // Panel is on the right edge of the window, so its width is the
       // distance from the cursor to the right edge of the viewport.
       const next = window.innerWidth - e.clientX;
-      const clamped = Math.min(Math.max(next, 320), Math.round(window.innerWidth * 0.7));
+      const clamped = Math.min(Math.max(next, CLOSE_DRAG_THRESHOLD), Math.round(window.innerWidth * 0.7));
       setViewerWidth(clamped);
     };
-    const onUp = () => {
+    const onUp = (e: MouseEvent) => {
       if (!viewerResizingRef.current) return;
       viewerResizingRef.current = false;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
+
+      const next = window.innerWidth - e.clientX;
+      if (next < MIN_VIEWER_WIDTH) {
+        // Dragged shut — close the panel and reset to the default width so
+        // the next open isn't stuck at whatever tiny size it was dragged to.
+        closeFileViewer();
+        setViewerWidth(440);
+      } else {
+        setViewerWidth(Math.min(next, Math.round(window.innerWidth * 0.7)));
+      }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -502,7 +516,7 @@ export default function Home() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, []);
+  }, [closeFileViewer]);
 
   /* Theme state */
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -1043,51 +1057,54 @@ export default function Home() {
       >
         <div className={`flex flex-col justify-between h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
         <div className="space-y-5 overflow-y-auto flex-1 min-w-[260px]">
-          {/* Logo + Actions */}
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <DocAgentMark className="w-9 h-9 shrink-0" />
-              <div>
-                <h1 className="font-bold text-slate-900 dark:text-slate-100 text-base tracking-tight">
-                  DocAgent RAG
-                </h1>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={toggleTheme}
-                className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
-                aria-label="Toggle theme"
-                title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-              >
-                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-              </button>
-
-              {/* Collapse — desktop only; mobile uses the X below via the
-                  overlay drawer instead. Same base style as the theme
-                  toggle above so both read at equal visual weight. */}
-              <button
-                type="button"
-                onClick={() => setDesktopSidebarOpen(false)}
-                className="hidden md:inline-flex p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
-                aria-label="Collapse sidebar"
-                title="Collapse sidebar"
-              >
-                <PanelLeftClose className="w-4 h-4" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSidebarOpen(false)}
-                className="md:hidden p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
-                aria-label="Close sidebar"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+          {/* Identity — logo + name centered as its own block, so it reads
+              as the app's mark rather than a header bar with buttons stuck
+              on the end of it. */}
+          <div className="flex flex-col items-center text-center pt-1">
+            <DocAgentMark className="w-10 h-10 shrink-0 mb-2" />
+            <h1 className="font-bold text-slate-900 dark:text-slate-100 text-base tracking-tight">
+              DocAgent RAG
+            </h1>
           </div>
+
+          {/* Toggles — a separate row below the identity block, with room
+              above it, so they read as controls rather than part of the
+              brand mark itself. */}
+          <div className="flex items-center justify-center gap-1 pb-1">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+              aria-label="Toggle theme"
+              title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            >
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </button>
+
+            {/* Collapse — desktop only; mobile uses the X below via the
+                overlay drawer instead. Same base style as the theme toggle
+                above so both read at equal visual weight. */}
+            <button
+              type="button"
+              onClick={() => setDesktopSidebarOpen(false)}
+              className="hidden md:inline-flex p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+              aria-label="Collapse sidebar"
+              title="Collapse sidebar"
+            >
+              <PanelLeftClose className="w-4 h-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="md:hidden p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+              aria-label="Close sidebar"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="border-t border-slate-200 dark:border-slate-800/80" />
 
           {/* New Chat Button */}
           <button
