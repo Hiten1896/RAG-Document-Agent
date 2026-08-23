@@ -1316,7 +1316,17 @@ export default function Home() {
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-sm md:hidden"
-          onClick={() => setSidebarOpen(false)}
+          onClick={() => {
+            setSidebarOpen(false);
+            // The sidebar slides off-screen via transform rather than
+            // unmounting, so any open row menu/rename would otherwise
+            // silently persist behind it and reappear mid-animation the
+            // next time the drawer opens.
+            setOpenMenuId(null);
+            setConfirmingDeleteId(null);
+            setRenamingId(null);
+            setRenameText('');
+          }}
         />
       )}
 
@@ -1333,8 +1343,11 @@ export default function Home() {
           ${desktopSidebarOpen ? 'md:w-80' : 'md:w-0 md:border-r-0'}
         `}
       >
-        <div className={`flex flex-col justify-between h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
-        <div className="space-y-5 overflow-y-auto flex-1 min-w-[260px]">
+        <div className={`flex flex-col h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
+        {/* Fixed header block — logo, toggles, New Chat. Does not scroll;
+            only the chat history list below it does, so these controls are
+            always reachable without hunting through a scrolled list. */}
+        <div className="space-y-5 shrink-0 min-w-[260px]">
           {/* Identity — logo and name side by side as one unit, that unit
               centered in the sidebar (not stacked/centered separately). */}
           <div className="flex items-center justify-center gap-3 pt-1">
@@ -1373,7 +1386,13 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={() => setSidebarOpen(false)}
+              onClick={() => {
+                setSidebarOpen(false);
+                setOpenMenuId(null);
+                setConfirmingDeleteId(null);
+                setRenamingId(null);
+                setRenameText('');
+              }}
               className="md:hidden p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
               aria-label="Close sidebar"
             >
@@ -1394,20 +1413,32 @@ export default function Home() {
           >
             <MessageSquarePlus className="w-4 h-4 text-indigo-600 dark:text-indigo-400" /> New Chat
           </button>
+        </div>
 
-          {/* Chat History — session-only: lives in memory for this tab and
-              is intentionally lost on reload, same as the rest of the app's
-              state. Not persisted to storage. Each row reveals a ⋯ menu on
-              hover (always visible on touch) with a Delete action, same
-              pattern as Claude's own chat list. */}
-          <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-              Chat History
-            </label>
-            <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
-              {conversations.map((c) => {
-                const isRenaming = renamingId === c.id;
-                const isConfirmingDelete = confirmingDeleteId === c.id;
+        {/* Chat History — session-only: lives in memory for this tab and is
+            intentionally lost on reload, same as the rest of the app's
+            state. Not persisted to storage. Each row reveals a ⋯ menu on
+            hover (always visible on touch) with Rename/Delete actions, same
+            pattern as Claude's own chat list.
+
+            This section is the ONLY scrollable part of the sidebar — it's
+            `flex-1 min-h-0` so it fills all the leftover space below the
+            fixed header and above the fixed footer, and its own
+            `overflow-y-auto` only kicks in once the list is actually taller
+            than that space. Previously this list was capped at a fixed
+            192px (`max-h-48`) with its own inner scrollbar, while the
+            sidebar around it *also* scrolled — two nested scrollbars
+            fighting for the same handful of rows, which made the list feel
+            cramped and put the ⋯ menu right at a scroll boundary where
+            clicks could land on the scrollbar instead of the button. */}
+        <div className="flex flex-col flex-1 min-h-0 mt-5 min-w-[260px]">
+          <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 shrink-0 mb-2">
+            Chat History
+          </label>
+          <div className="space-y-1 pr-0.5 overflow-y-auto flex-1 min-h-0">
+            {conversations.map((c) => {
+              const isRenaming = renamingId === c.id;
+              const isConfirmingDelete = confirmingDeleteId === c.id;
 
                 return (
                 <div key={c.id} className="relative group">
@@ -1442,7 +1473,7 @@ export default function Home() {
                         handleSwitchConversation(c.id);
                         setSidebarOpen(false);
                       }}
-                      className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
+                      className={`w-full text-left pl-3 pr-8 py-2.5 md:py-2 rounded-lg text-xs truncate transition cursor-pointer ${
                         c.id === activeConversationId
                           ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
                           : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
@@ -1467,8 +1498,16 @@ export default function Home() {
                         setOpenMenuId((prev) => (prev === c.id ? null : c.id));
                         setConfirmingDeleteId(null);
                       }}
-                      className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
-                        openMenuId === c.id ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+                      className={`absolute right-1 top-1/2 -translate-y-1/2 p-1.5 md:p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
+                        openMenuId === c.id
+                          ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60'
+                          // Always visible on touch (no hover state to reveal
+                          // it on tap), opacity-0-until-hover on desktop —
+                          // matching Claude's own app, where the row's ⋯ is
+                          // a static affordance on mobile and a hover reveal
+                          // on desktop, not hidden behind a gesture that
+                          // doesn't exist on touch.
+                          : 'opacity-70 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100'
                       }`}
                       aria-label={`More options for ${c.title}`}
                       aria-haspopup="menu"
@@ -1482,7 +1521,7 @@ export default function Home() {
                     <div
                       ref={chatMenuRef}
                       role="menu"
-                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
+                      className="absolute right-0 top-[calc(100%+2px)] z-20 w-48 md:w-44 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
                     >
                       {isConfirmingDelete ? (
                         /* ── Delete confirmation — replaces the menu's
@@ -1502,7 +1541,7 @@ export default function Home() {
                                 e.stopPropagation();
                                 handleDeleteConversation(c.id);
                               }}
-                              className="flex-1 px-2 py-1 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-medium transition cursor-pointer"
+                              className="flex-1 px-2 py-1.5 md:py-1 rounded-md bg-red-600 hover:bg-red-500 text-white text-[11px] font-medium transition cursor-pointer"
                             >
                               Delete
                             </button>
@@ -1512,7 +1551,7 @@ export default function Home() {
                                 e.stopPropagation();
                                 setConfirmingDeleteId(null);
                               }}
-                              className="flex-1 px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-medium transition cursor-pointer"
+                              className="flex-1 px-2 py-1.5 md:py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-medium transition cursor-pointer"
                             >
                               Cancel
                             </button>
@@ -1527,7 +1566,7 @@ export default function Home() {
                               e.stopPropagation();
                               handleStartRename(c.id, c.title);
                             }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                            className="w-full flex items-center gap-2 px-3 py-2.5 md:py-1.5 text-xs text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
                           >
                             <Pencil className="w-3.5 h-3.5" />
                             Rename
@@ -1539,7 +1578,7 @@ export default function Home() {
                               e.stopPropagation();
                               setConfirmingDeleteId(c.id);
                             }}
-                            className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
+                            className="w-full flex items-center gap-2 px-3 py-2.5 md:py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                             Delete
@@ -1554,11 +1593,9 @@ export default function Home() {
             </div>
           </div>
 
-
-        </div>
-
-        {/* Backend Status Footer */}
-        <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px]">
+        {/* Backend Status Footer — fixed, does not scroll with the list
+            above it. */}
+        <div className="shrink-0 text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px]">
           <span>Backend Pipeline:</span>
           {backendOnline === null ? (
             <span className="inline-flex items-center gap-1.5 text-slate-500 dark:text-slate-400 font-medium">
