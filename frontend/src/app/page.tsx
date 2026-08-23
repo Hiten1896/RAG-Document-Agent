@@ -439,19 +439,55 @@ export default function Home() {
     };
   }, [viewerFile]);
 
-  /* Empty-state greeting — computed once per mount from local time rather
-     than kept in state, since it only needs to be right when the screen
-     first renders. */
-  const greeting = useRef(
-    (() => {
-      const hour = new Date().getHours();
-      if (hour < 5) return 'Still up? What can I help with?';
-      if (hour < 12) return 'Good morning.';
-      if (hour < 17) return 'Good afternoon.';
-      if (hour < 22) return 'Good evening.';
-      return 'Still up? What can I help with?';
-    })()
-  ).current;
+  /* Empty-state greeting — must NOT be computed during the initial render.
+     `new Date().getHours()` differs between the server's clock (SSR) and
+     the browser's local clock, so computing it eagerly produces two
+     different strings — the server's version flashes, then snaps to the
+     client's on hydration. Instead it starts empty and is set once in an
+     effect, which only ever runs client-side, so there's exactly one
+     render of it and no mismatch.
+
+     Four real periods (morning / afternoon / evening / night), each with
+     a small pool of headline + subtext pairs so the screen doesn't say
+     the exact same line on every visit within that window. */
+  const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
+    morning: [
+      { headline: 'Good morning.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Morning. Ready when you are.', subtext: 'Upload a document or ask about one already shared, and I\u2019ll dig in.' },
+      { headline: 'Rise and shine.', subtext: 'Bring a PDF, or ask about the ones already here — text, tables, or diagrams.' },
+    ],
+    afternoon: [
+      { headline: 'Good afternoon.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Afternoon. What are we digging into?', subtext: 'Share a document or pick up where an earlier one left off.' },
+      { headline: 'Good afternoon — what can I help with?', subtext: 'Text, tables, diagrams — ask about anything you\u2019ve shared.' },
+    ],
+    evening: [
+      { headline: 'Good evening.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Evening. What can I help with?', subtext: 'Upload something new or ask about a document already on hand.' },
+      { headline: 'Good evening — let\u2019s take a look.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
+    ],
+    night: [
+      { headline: 'Still up? What can I help with?', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Working late?', subtext: 'Share a document and I\u2019ll help you get through it.' },
+      { headline: 'Burning the midnight oil.', subtext: 'Upload a PDF or ask about one already shared — I\u2019m here.' },
+    ],
+  };
+
+  const [greeting, setGreeting] = useState('');
+  const [greetingSubtext, setGreetingSubtext] = useState(
+    "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared."
+  );
+
+  useEffect(() => {
+    const hour = new Date().getHours();
+    // morning 4–12, afternoon 12–16, evening 16–20, night 20–4 (wraps past midnight)
+    const period: keyof typeof GREETINGS =
+      hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
+    const pool = GREETINGS[period];
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    setGreeting(pick.headline);
+    setGreetingSubtext(pick.subtext);
+  }, []);
 
   /* Chat state */
   const [query, setQuery] = useState('');
@@ -1246,7 +1282,7 @@ export default function Home() {
                 {greeting}
               </h2>
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
-                Drop in a PDF, or just ask a question — I&apos;ll pull it from the documents you&apos;ve shared.
+                {greetingSubtext}
               </p>
               <div className="w-full max-w-2xl px-4">
                 <ChatComposer
