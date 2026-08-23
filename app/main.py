@@ -146,6 +146,29 @@ vectorstore = Chroma(
     embedding_function=embeddings,
 )
 
+# Chroma persists to disk by design, so without this, every PDF ever
+# uploaded stays in the index forever — across restarts, across demos, across
+# unrelated test uploads. That grows the search space with increasingly
+# irrelevant vectors and causes "why is it citing a file I never uploaded
+# this session" confusion. RESET_DB_ON_START opts into a clean slate every
+# time the process starts — appropriate for a demo/single-operator
+# deployment where "session" == "server run". Defaults to true; set to
+# "false" in .env if uploaded documents should survive a restart instead.
+RESET_DB_ON_START = os.getenv("RESET_DB_ON_START", "true").strip().lower() not in (
+    "false", "0", "no",
+)
+if RESET_DB_ON_START:
+    try:
+        existing_ids = vectorstore.get(include=[]).get("ids") or []
+        if existing_ids:
+            vectorstore.delete(ids=existing_ids)
+            logger.info(
+                "RESET_DB_ON_START: cleared %d existing chunk(s) from '%s' on startup.",
+                len(existing_ids), COLLECTION_NAME,
+            )
+    except Exception:
+        logger.exception("RESET_DB_ON_START: failed to clear existing collection on startup.")
+
 llm = ChatGoogleGenerativeAI(
     model=LLM_MODEL,
     google_api_key=GEMINI_API_KEY,

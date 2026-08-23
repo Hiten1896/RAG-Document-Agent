@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
 import { ingestDocument, checkIngestStatus, queryDocument, SourceMetadata } from '@/lib/api';
 import {
   Send,
@@ -956,7 +957,48 @@ export default function Home() {
                           : 'bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 rounded-tl-none backdrop-blur-sm'
                       }`}
                     >
-                      <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                      {isUser ? (
+                        <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                      ) : (
+                        // Gemini's answers are Markdown (headers, bold, bullet
+                        // lists) — rendering that as plain text via <p> left
+                        // raw "###" / "**" / "*" characters visible in the
+                        // chat bubble instead of actual formatting. Only agent
+                        // messages go through this: the user's own typed query
+                        // should never be Markdown-interpreted (e.g. a literal
+                        // "*" in their question shouldn't turn into italics).
+                        <div className="markdown-body break-words text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                          <ReactMarkdown
+                            components={{
+                              h1: (props) => <h3 className="text-base font-bold mt-3 mb-1.5" {...props} />,
+                              h2: (props) => <h3 className="text-base font-bold mt-3 mb-1.5" {...props} />,
+                              h3: (props) => <h4 className="text-sm font-bold mt-3 mb-1.5" {...props} />,
+                              p: (props) => <p className="mb-2 whitespace-pre-wrap" {...props} />,
+                              ul: (props) => <ul className="list-disc pl-5 mb-2 space-y-0.5" {...props} />,
+                              ol: (props) => <ol className="list-decimal pl-5 mb-2 space-y-0.5" {...props} />,
+                              li: (props) => <li className="pl-0.5" {...props} />,
+                              strong: (props) => <strong className="font-semibold" {...props} />,
+                              code: (props) => (
+                                <code
+                                  className="bg-slate-100 dark:bg-slate-800 rounded px-1 py-0.5 text-xs font-mono"
+                                  {...props}
+                                />
+                              ),
+                              hr: () => <hr className="my-3 border-slate-200 dark:border-slate-700" />,
+                              a: (props) => (
+                                <a
+                                  className="text-indigo-600 dark:text-indigo-400 underline"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  {...props}
+                                />
+                              ),
+                            }}
+                          >
+                            {msg.text}
+                          </ReactMarkdown>
+                        </div>
+                      )}
 
                       {/* Source Citations */}
                       {!isUser && dedupedSources.length > 0 && (
