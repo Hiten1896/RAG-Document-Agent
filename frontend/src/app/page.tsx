@@ -6,17 +6,14 @@ import { ingestDocument, checkIngestStatus, queryDocument, SourceMetadata } from
 import {
   Send,
   FileText,
-  Bot,
   Loader2,
   CheckCircle2,
   AlertCircle,
   Edit3,
   X,
   Image as ImageIcon,
-  Sparkles,
   Menu,
   MessageSquarePlus,
-  Zap,
   Search,
   FileUp,
   Mic,
@@ -53,11 +50,6 @@ interface Conversation {
   titleGenerated?: boolean;
 }
 
-const WELCOME_MESSAGE: Message = {
-  sender: 'agent',
-  text: 'Hello! Upload one or more PDFs to automatically ingest text and diagrams. Ask me anything across all of them!',
-};
-
 // Session-only: kept in memory for the tab's lifetime, not persisted to
 // localStorage/sessionStorage, so a reload starts fresh by design.
 function makeConversationId(): string {
@@ -92,6 +84,41 @@ async function generateChatTitle(message: string): Promise<string | null> {
   }
 }
 
+/* ───── Brand mark ─────
+   An open document with a spark of insight rising from the page — reads at
+   favicon size as a simple folded-corner sheet, and at sidebar size the
+   spark/gradient reads too. Uses the same indigo→violet pair as the rest of
+   the UI so it never feels like a bolted-on asset. */
+function DocAgentMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 40 40" className={className} xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DocAgent">
+      <defs>
+        <linearGradient id="docagent-mark-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#4f46e5" />
+          <stop offset="100%" stopColor="#8b5cf6" />
+        </linearGradient>
+      </defs>
+      <rect width="40" height="40" rx="10" fill="url(#docagent-mark-grad)" />
+      {/* folded-corner page */}
+      <path
+        d="M12 9.5c0-.83.67-1.5 1.5-1.5H21l6 6v16.5c0 .83-.67 1.5-1.5 1.5h-12A1.5 1.5 0 0 1 12 30.5v-21Z"
+        fill="white"
+        fillOpacity="0.95"
+      />
+      <path d="M21 8v4.5c0 .83.67 1.5 1.5 1.5H27" fill="none" stroke="#4f46e5" strokeOpacity="0.35" strokeWidth="1.4" />
+      {/* text lines */}
+      <line x1="15.5" y1="19" x2="23.5" y2="19" stroke="#4f46e5" strokeOpacity="0.55" strokeWidth="1.6" strokeLinecap="round" />
+      <line x1="15.5" y1="23" x2="23.5" y2="23" stroke="#4f46e5" strokeOpacity="0.55" strokeWidth="1.6" strokeLinecap="round" />
+      <line x1="15.5" y1="27" x2="20" y2="27" stroke="#4f46e5" strokeOpacity="0.35" strokeWidth="1.6" strokeLinecap="round" />
+      {/* spark of insight */}
+      <path
+        d="M27 8.5l1.1 2.4 2.4 1.1-2.4 1.1-1.1 2.4-1.1-2.4-2.4-1.1 2.4-1.1L27 8.5Z"
+        fill="white"
+      />
+    </svg>
+  );
+}
+
 function getErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === 'string' && err.trim()) return err;
@@ -119,7 +146,7 @@ export default function Home() {
      switching conversations does not touch ingestedFiles, since documents
      stay available to every conversation in this session. */
   const [conversations, setConversations] = useState<Conversation[]>(() => [
-    { id: makeConversationId(), title: 'New Chat', messages: [WELCOME_MESSAGE] },
+    { id: makeConversationId(), title: 'New Chat', messages: [] },
   ]);
   const [activeConversationId, setActiveConversationId] = useState<string>(
     () => conversations[0].id
@@ -237,6 +264,20 @@ export default function Home() {
       document.body.style.overflow = prevOverflow;
     };
   }, [viewerFile]);
+
+  /* Empty-state greeting — computed once per mount from local time rather
+     than kept in state, since it only needs to be right when the screen
+     first renders. */
+  const greeting = useRef(
+    (() => {
+      const hour = new Date().getHours();
+      if (hour < 5) return 'Still up? What can I help with?';
+      if (hour < 12) return 'Good morning.';
+      if (hour < 17) return 'Good afternoon.';
+      if (hour < 22) return 'Good evening.';
+      return 'Still up? What can I help with?';
+    })()
+  ).current;
 
   /* Chat state */
   const [query, setQuery] = useState('');
@@ -707,7 +748,7 @@ export default function Home() {
     const newConversation: Conversation = {
       id: makeConversationId(),
       title: 'New Chat',
-      messages: [WELCOME_MESSAGE],
+      messages: [],
     };
     setConversations((prev) => [newConversation, ...prev]);
     setActiveConversationId(newConversation.id);
@@ -738,7 +779,7 @@ export default function Home() {
     return result;
   };
 
-  const isEmptyChat = messages.length <= 1;
+  const isEmptyChat = messages.length === 0;
 
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
@@ -788,9 +829,7 @@ export default function Home() {
           {/* Logo + Actions */}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="p-2.5 bg-gradient-to-tr from-indigo-600 to-violet-500 text-white rounded-xl shadow-lg shadow-indigo-500/20">
-                <Bot className="w-6 h-6" />
-              </div>
+              <DocAgentMark className="w-9 h-9 shrink-0" />
               <div>
                 <h1 className="font-bold text-slate-900 dark:text-slate-100 text-base tracking-tight">
                   DocAgent RAG
@@ -913,9 +952,7 @@ export default function Home() {
             <Menu className="w-5 h-5" />
           </button>
           <div className="flex items-center gap-2">
-            <div className="p-1.5 bg-gradient-to-tr from-indigo-600 to-violet-500 text-white rounded-lg">
-              <Bot className="w-4 h-4" />
-            </div>
+            <DocAgentMark className="w-7 h-7 shrink-0" />
             <span className="font-semibold text-sm text-slate-900 dark:text-slate-200">DocAgent</span>
           </div>
           <div className="flex items-center gap-1">
@@ -933,37 +970,19 @@ export default function Home() {
         {/* ── Chat messages area ── */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6">
 
-          {/* Empty state hero */}
+          {/* Empty state hero — a quiet, personal welcome rather than a
+              feature-card grid. The greeting varies with time of day, the
+              same small touch Claude's own apps use to make a cold-start
+              screen feel present rather than templated. */}
           {isEmptyChat && !loading && (
             <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12 sm:py-20">
-              <div className="p-4 bg-gradient-to-tr from-indigo-600/10 to-violet-500/10 dark:from-indigo-600/20 dark:to-violet-500/20 rounded-2xl border border-indigo-200 dark:border-indigo-500/20 mb-6 shadow-sm">
-                <Sparkles className="w-10 h-10 sm:w-12 sm:h-12 text-indigo-600 dark:text-indigo-400" />
-              </div>
-              <h2 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-slate-100 mb-2">
-                Document Intelligence
+              <DocAgentMark className="w-14 h-14 sm:w-16 sm:h-16 mb-6" />
+              <h2 className="text-2xl sm:text-3xl font-semibold text-slate-900 dark:text-slate-100 mb-3 tracking-tight">
+                {greeting}
               </h2>
-              <p className="text-sm text-slate-600 dark:text-slate-400 max-w-md mb-8 leading-relaxed">
-                Upload a PDF document and ask questions about its text, tables, and diagrams.
-                Powered by Gemini and vector search.
+              <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed">
+                Drop in a PDF, or just ask a question — I&apos;ll pull it from the documents you&apos;ve shared.
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-lg">
-                <button
-                  type="button"
-                  onClick={handleTriggerUpload}
-                  className="flex flex-col items-center gap-2 p-4 rounded-xl bg-white dark:bg-slate-900/60 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 shadow-sm transition cursor-pointer"
-                >
-                  <FileUp className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
-                  <span>Upload PDF</span>
-                </button>
-                <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 shadow-sm">
-                  <Zap className="w-5 h-5 text-amber-500 dark:text-amber-400" />
-                  <span>Auto-Ingest</span>
-                </div>
-                <div className="flex flex-col items-center gap-2 p-4 rounded-xl bg-white dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 shadow-sm">
-                  <Search className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
-                  <span>Ask Questions</span>
-                </div>
-              </div>
             </div>
           )}
 
