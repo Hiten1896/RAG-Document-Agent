@@ -33,6 +33,7 @@ interface Message {
   sender: 'user' | 'agent';
   text: string;
   sources?: SourceMetadata[];
+  attachedFiles?: string[];
 }
 
 interface IngestedFile {
@@ -41,6 +42,7 @@ interface IngestedFile {
   pages?: number;
   chunks?: number;
   error?: string;
+  file?: File;
 }
 
 interface Conversation {
@@ -86,11 +88,6 @@ export default function Home() {
   /* Upload state — multiple files can now be ingested and queried together */
   const [ingestedFiles, setIngestedFiles] = useState<IngestedFile[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<{
-    type: 'success' | 'error' | 'info';
-    message: string;
-    details?: string;
-  } | null>(null);
 
   /* Chat history — session-only (kept in memory, never persisted), so a
      reload intentionally starts clean. Each conversation is independent;
@@ -124,6 +121,12 @@ export default function Home() {
     },
     [activeConversationId]
   );
+
+  /* Files uploaded but not yet sent with a query — shown as chips above the
+     input, then attached to the next user message once sent (mirrors how
+     the Claude app shows an upload attached to the message you send after
+     it, and leaves messages sent without an upload unaffected). */
+  const [pendingAttachments, setPendingAttachments] = useState<string[]>([]);
 
   /* Chat state */
   const [query, setQuery] = useState('');
@@ -220,15 +223,6 @@ export default function Home() {
     const id = setTimeout(() => setMicError(null), 4000);
     return () => clearTimeout(id);
   }, [micError]);
-
-  // Auto-dismiss success/info upload toasts after a few seconds; errors stay
-  // on screen until the next upload attempt since they carry a diagnostic
-  // message worth reading in full.
-  useEffect(() => {
-    if (!uploadStatus || uploadStatus.type === 'error') return;
-    const id = setTimeout(() => setUploadStatus(null), 5000);
-    return () => clearTimeout(id);
-  }, [uploadStatus]);
 
   const handleMicClick = (e?: React.MouseEvent) => {
     if (e) {
@@ -384,35 +378,24 @@ export default function Home() {
   }, []);
 
   /* Ingestion — fires all files off in parallel; each tracks its own status
-     entry in ingestedFiles rather than sharing one uploadStatus slot, so
-     one file failing doesn't hide another's progress or overwrite its result. */
+     entry in ingestedFiles, shown as a file card (loading/success/failed),
+     so one file failing doesn't hide another's progress or overwrite its result. */
   const ingestMultiple = async (files: File[]) => {
     const pdfFiles = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
-    const rejected = files.length - pdfFiles.length;
 
-    if (rejected > 0) {
-      setUploadStatus({
-        type: rejected === files.length ? 'error' : 'info',
-        message:
-          rejected === files.length
-            ? 'Only PDF documents are supported.'
-            : `Skipped ${rejected} non-PDF file${rejected > 1 ? 's' : ''}.`,
-      });
-    }
-    if (!pdfFiles.length) return;
+    // Skip files that are already ingested or currently ingesting — retry
+    // for a failed file goes through handleRetryIngest instead, which
+    // explicitly re-triggers that one file.
+    const newFiles = pdfFiles.filter((f) => {
+      const existing = ingestedFiles.find((ef) => ef.name === f.name);
+      return !existing || existing.status === 'failed';
+    });
+
+    if (!newFiles.length) return;
 
     setSidebarOpen(false);
     setUploading(true);
-    setUploadStatus({
-      type: 'info',
-      message:
-        pdfFiles.length === 1
-          ? `Ingesting ${pdfFiles[0].name}...`
-          : `Ingesting ${pdfFiles.length} files...`,
-      details: 'Extracting text and generating vector embeddings...',
-    });
-
-    await Promise.all(pdfFiles.map((f) => triggerAutoIngest(f)));
+    await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
     setUploading(false);
   };
 
@@ -426,8 +409,9 @@ export default function Home() {
 
     setIngestedFiles((prev) => [
       ...prev.filter((f) => f.name !== name),
-      { name, status: 'processing' },
+      { name, status: 'processing', file: fileToIngest },
     ]);
+    setPendingAttachments((prev) => (prev.includes(name) ? prev : [...prev, name]));
 
     try {
       const res = await ingestDocument(fileToIngest);
@@ -450,22 +434,12 @@ export default function Home() {
                   : f
               )
             );
-            setUploadStatus({
-              type: 'success',
-              message: `Indexed ${name}`,
-              details: `${statusRes.pages || 1} pages • ${statusRes.chunks || 0} chunks`,
-            });
           } else if (statusRes.status === 'failed') {
             setIngestedFiles((prev) =>
               prev.map((f) =>
                 f.name === name ? { ...f, status: 'failed', error: statusRes.error } : f
               )
             );
-            setUploadStatus({
-              type: 'error',
-              message: `Ingestion failed: ${name}`,
-              details: statusRes.error || 'Could not parse document.',
-            });
           } else {
             // `not_found` is also treated as still-pending: the background task
             // may not have registered the job yet.
@@ -480,11 +454,6 @@ export default function Home() {
                     : f
                 )
               );
-              setUploadStatus({
-                type: 'info',
-                message: `${name}: processing is taking longer than expected.`,
-                details: 'Still indexing in the background — check back or retry.',
-              });
             }
           }
         } catch (err: unknown) {
@@ -495,7 +464,6 @@ export default function Home() {
           setIngestedFiles((prev) =>
             prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
           );
-          setUploadStatus({ type: 'error', message: `Lost track of ${name}`, details: message });
         }
       };
 
@@ -506,8 +474,15 @@ export default function Home() {
       setIngestedFiles((prev) =>
         prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
       );
-      setUploadStatus({ type: 'error', message: `Ingestion error: ${name}`, details: message });
     }
+  };
+
+  /* Retry — re-triggers ingestion for a failed file using the File object
+     already held onto from the original upload, so the user doesn't have
+     to re-pick it from disk. */
+  const handleRetryIngest = (fileToRetry: IngestedFile) => {
+    if (!fileToRetry.file) return;
+    triggerAutoIngest(fileToRetry.file);
   };
 
   /* Query */
@@ -516,8 +491,13 @@ export default function Home() {
     if (!query.trim() || loading) return;
 
     const userText = query.trim();
+    const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
     setQuery('');
-    setMessagesForActive((prev) => [...prev, { sender: 'user', text: userText }]);
+    setPendingAttachments([]);
+    setMessagesForActive((prev) => [
+      ...prev,
+      { sender: 'user', text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
+    ]);
     setLoading(true);
 
     try {
@@ -643,35 +623,6 @@ export default function Home() {
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-600 dark:text-red-300 text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-center gap-2 animate-fade-in max-w-[90vw]">
           <MicOff className="w-4 h-4 shrink-0" />
           <span className="truncate">{micError}</span>
-        </div>
-      )}
-
-      {/* Upload Status Toast — replaces the sidebar status card now that
-          uploading only happens via the "+" icon in the message bar. Sits
-          just above the input so it's visible without covering the mic toast. */}
-      {uploadStatus && (
-        <div
-          className={`fixed bottom-24 sm:bottom-28 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-start gap-2 animate-fade-in max-w-[92vw] sm:max-w-md border ${
-            uploadStatus.type === 'error'
-              ? 'bg-red-500/10 border-red-500/30 text-red-600 dark:text-red-300'
-              : uploadStatus.type === 'success'
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
-              : 'bg-indigo-500/10 border-indigo-500/30 text-indigo-700 dark:text-indigo-300'
-          }`}
-        >
-          {uploadStatus.type === 'error' ? (
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-          ) : uploadStatus.type === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-          ) : (
-            <Loader2 className="w-4 h-4 animate-spin shrink-0 mt-0.5" />
-          )}
-          <div className="min-w-0">
-            <div className="truncate">{uploadStatus.message}</div>
-            {uploadStatus.details && (
-              <div className="text-[11px] opacity-80 leading-relaxed">{uploadStatus.details}</div>
-            )}
-          </div>
         </div>
       )}
 
@@ -812,21 +763,6 @@ export default function Home() {
           </div>
         )}
 
-        {/* Desktop Top Header Bar */}
-        <header className="hidden md:flex items-center justify-between px-6 py-3.5 border-b border-slate-200 dark:border-slate-800/80 bg-white/70 dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-              Workspace
-            </span>
-            <span className="text-slate-300 dark:text-slate-700">•</span>
-            <span className="text-xs font-medium text-indigo-600 dark:text-indigo-400">
-              {ingestedFiles.length
-                ? `${ingestedFiles.length} document${ingestedFiles.length > 1 ? 's' : ''} loaded`
-                : 'No active documents'}
-            </span>
-          </div>
-        </header>
-
         {/* Mobile Top Bar */}
         <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
           <button
@@ -958,7 +894,22 @@ export default function Home() {
                       }`}
                     >
                       {isUser ? (
-                        <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                        <>
+                          {msg.attachedFiles && msg.attachedFiles.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mb-2">
+                              {msg.attachedFiles.map((fname, fIndex) => (
+                                <span
+                                  key={fIndex}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 border border-white/20 text-[11px] sm:text-xs font-medium text-white"
+                                >
+                                  <FileText className="w-3.5 h-3.5 shrink-0" />
+                                  <span className="truncate max-w-[160px] sm:max-w-[220px]">{fname}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                        </>
                       ) : (
                         // Gemini's answers are Markdown (headers, bold, bullet
                         // lists) — rendering that as plain text via <p> left
@@ -1081,6 +1032,88 @@ export default function Home() {
 
         {/* ── Chat Input ── */}
         <div className="p-3 sm:p-4 lg:p-6 border-t border-slate-200 dark:border-slate-800/80 bg-white/80 dark:bg-slate-900/40 backdrop-blur-xl shrink-0">
+          {/* Pending file cards — files uploaded but not yet sent with a
+              query, styled like Claude's own compose-bar attachment card
+              (icon tile, truncated name, type badge). Shows loading/success/
+              failed state right on the card itself instead of a separate
+              popup toast. A failed card shows a Retry button. */}
+          {pendingAttachments.length > 0 && (
+            <div className="flex flex-wrap gap-2.5 max-w-4xl mx-auto mb-3">
+              {pendingAttachments.map((fname, idx) => {
+                const fileInfo = ingestedFiles.find((f) => f.name === fname);
+                const status = fileInfo?.status ?? 'processing';
+                const baseName = fname.replace(/\.pdf$/i, '');
+
+                return (
+                  <div
+                    key={idx}
+                    className={`relative group w-[168px] rounded-xl border p-2.5 shadow-sm transition ${
+                      status === 'failed'
+                        ? 'bg-red-500/5 border-red-500/30'
+                        : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                    }`}
+                  >
+                    {/* Remove button */}
+                    <button
+                      type="button"
+                      onClick={() => setPendingAttachments((prev) => prev.filter((n) => n !== fname))}
+                      className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-slate-700 dark:bg-slate-600 text-white opacity-0 group-hover:opacity-100 transition shadow-md cursor-pointer"
+                      aria-label={`Remove ${fname}`}
+                      title="Remove"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+
+                    {/* Icon tile */}
+                    <div
+                      className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${
+                        status === 'failed'
+                          ? 'bg-red-500/15 text-red-500 dark:text-red-400'
+                          : status === 'completed'
+                          ? 'bg-indigo-600/10 text-indigo-600 dark:text-indigo-400'
+                          : 'bg-indigo-600/10 text-indigo-600 dark:text-indigo-400'
+                      }`}
+                    >
+                      {status === 'processing' ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : status === 'failed' ? (
+                        <AlertCircle className="w-4 h-4" />
+                      ) : (
+                        <FileText className="w-4 h-4" />
+                      )}
+                    </div>
+
+                    {/* Filename */}
+                    <p
+                      className="text-xs font-medium text-slate-800 dark:text-slate-200 leading-snug line-clamp-2 break-words"
+                      title={fname}
+                    >
+                      {baseName}
+                    </p>
+
+                    {/* Footer: type badge + status/retry */}
+                    <div className="mt-1.5 flex items-center justify-between gap-1.5">
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                        PDF
+                      </span>
+                      {status === 'failed' ? (
+                        <button
+                          type="button"
+                          onClick={() => fileInfo && handleRetryIngest(fileInfo)}
+                          className="text-[10px] font-semibold text-red-600 dark:text-red-300 hover:text-red-700 dark:hover:text-red-200 underline decoration-dotted underline-offset-2 cursor-pointer"
+                          title={fileInfo?.error || 'Retry ingestion'}
+                        >
+                          Retry
+                        </button>
+                      ) : status === 'completed' ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
           <form onSubmit={handleSendQuery} className="flex gap-2 sm:gap-3 max-w-4xl mx-auto">
             {/* "+" attach button — opens the file picker with `multiple` set,
                 so one or several PDFs can be added right from the message
