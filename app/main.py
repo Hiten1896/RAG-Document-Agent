@@ -1,8 +1,10 @@
 import logging
 import os
 import re
+import requests
 import tempfile
 import threading
+import time
 import unicodedata
 from collections import OrderedDict
 from collections.abc import MutableMapping
@@ -15,10 +17,9 @@ from pydantic import BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 from dotenv import load_dotenv
 
-# LangChain, HuggingFace & Google GenAI Imports
+# LangChain & Google GenAI Imports
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 # `langchain_community.vectorstores.Chroma` is the deprecated shim; the
@@ -26,30 +27,14 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 # requirements.txt, and what rag_agent_project.ipynb uses).
 from langchain_chroma import Chroma
 
-# fitz (PyMuPDF) is used directly, not just via PyMuPDFLoader, to rasterize
-# individual pages for OCR fallback. Reusing PyMuPDF for this (instead of
-# adding poppler/pdf2image) avoids a second, OS-level dependency on top of
-# Tesseract — poppler needs its own separate installer on Windows.
-import fitz
-
-# OCR is optional: pytesseract needs the Tesseract binary installed
-# separately (not pip-installable), so a fresh clone without it would
-# otherwise crash at import time before the server could even start.
-# Import lazily-guarded so the rest of the app still works — scanned PDFs
-# just get a clear "install Tesseract" error instead of ingestion silently
-# being unavailable app-wide.
-try:
-    import pytesseract
-    from PIL import Image
-    OCR_AVAILABLE = True
-except ImportError:
-    OCR_AVAILABLE = False
-
 load_dotenv()
 
 logger = logging.getLogger("docagent")
 
-# ── API Key Verification (Supports both GEMINI_API_KEY and GOOGLE_API_KEY) ──
+# ── API Key Verification ──
+# GEMINI_API_KEY (or GOOGLE_API_KEY) is used only for answer generation now —
+# one call per question, not per chunk, so it's far less exposed to quota
+# limits than embedding calls were.
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if not GEMINI_API_KEY:
@@ -57,6 +42,21 @@ if not GEMINI_API_KEY:
         "No Gemini API key found. Copy .env.example to .env and set "
         "GOOGLE_API_KEY (or GEMINI_API_KEY) to a key from "
         "https://aistudio.google.com/."
+    )
+
+# JINA_API_KEY powers embeddings (ingestion + query-time similarity search).
+# Split from Gemini deliberately: embedding a document is dozens to hundreds
+# of API calls, which repeatedly exhausted Gemini's free-tier embedding
+# quota (429 RESOURCE_EXHAUSTED) even with small batches and backoff. Jina's
+# free tier grants 1M tokens with no monthly call cap, which comfortably
+# covers ingesting documents of unknown size handed over live, without also
+# consuming the same quota pool the answer-generation calls depend on.
+JINA_API_KEY = os.getenv("JINA_API_KEY")
+
+if not JINA_API_KEY:
+    raise RuntimeError(
+        "No Jina API key found. Set JINA_API_KEY in .env to a key from "
+        "https://jina.ai/embeddings/ (free tier, no card required)."
     )
 
 # ── Paths ──
@@ -71,36 +71,96 @@ PERSIST_DIR = Path(
 PERSIST_DIR.mkdir(parents=True, exist_ok=True)
 
 # Named explicitly instead of relying on Chroma's default "langchain"
-# collection. Embeddings are local HuggingFace MiniLM (384-dim) again, so this
-# collection is dimensionally incompatible with any "docagent_gemini" data
-# from a prior Gemini-embeddings run — those chunks won't be found by
-# similarity search here and would need re-ingesting into this collection.
-COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "docagent_hf")
+# collection. `data/chroma_db` may hold orphaned collections from earlier
+# embedding providers tried during development (local MiniLM at 384 dims,
+# Gemini at 768/3072 dims) — those are dimensionally incompatible with Jina's
+# 1024-dim vectors and would corrupt similarity search if mixed in. Naming
+# this collection explicitly keeps it isolated; old collections are simply
+# unused, not deleted, and can be removed manually if disk space matters.
+COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "docagent_jina")
 
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-# `gemini-2.5-flash` has been retired from the v1beta model catalog for
-# accounts provisioned after the 2.5 line was sunset — Google's own 404 for
-# this key names `gemini-3.6-flash` as the direct replacement, so that's the
-# new default. (An even newer `gemini-3.7-flash` also exists if a future
-# migration is needed — set LLM_MODEL to override without a code change.)
+# jina-embeddings-v3: 1024 dims, 8192-token context, free tier covers
+# ingesting documents of unknown size handed over live without touching the
+# Gemini quota that answer generation depends on. See JINA_API_KEY above for
+# why this is a separate provider from the LLM.
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "jina-embeddings-v3")
+JINA_EMBED_URL = "https://api.jina.ai/v1/embeddings"
+
+# The LLM call in /query is one request per question, not one per chunk, so
+# it's far less likely to hit the same quota wall embeddings did.
+# `gemini-1.5-flash` was retired first, then `gemini-2.5-flash` was ALSO
+# retired for new-user access shortly after ("no longer available to new
+# users" — see the 404 this threw). Gemini's model lineup moves fast enough
+# that any hardcoded name here has a real chance of going stale again;
+# `gemini-3.6-flash` is Google's own suggested replacement in that error and
+# is confirmed present in this account's `ListModels` output. If this 404s
+# again later, re-run `GET /v1beta/models?key=...` and swap in whatever's
+# current — the error message itself usually names the successor.
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.6-flash")
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "50")) * 1024 * 1024
 
-# ── OCR Configuration ──
-# A per-page character threshold, not a whole-document one. A 40-page PDF
-# where only 2 pages are scanned photos still needs those 2 pages OCR'd —
-# checking total document length would let a few good text pages mask a
-# batch of image-only ones, silently losing that content instead of
-# recovering it.
-MIN_CHARS_PER_PAGE = int(os.getenv("MIN_CHARS_PER_PAGE", "20"))
-# Render scanned pages at higher DPI than the PDF's default (usually 72) —
-# Tesseract's accuracy drops sharply below ~200 DPI, especially on
-# handwriting or small/photocopied text.
-OCR_DPI = int(os.getenv("OCR_DPI", "300"))
-if os.getenv("TESSERACT_CMD"):
-    if OCR_AVAILABLE:
-        pytesseract.pytesseract.tesseract_cmd = os.getenv("TESSERACT_CMD")
+
+class JinaEmbeddings:
+    """Minimal LangChain-`Embeddings`-compatible wrapper around Jina AI's
+    REST embeddings endpoint (https://api.jina.ai/v1/embeddings).
+
+    Implemented with a plain `requests` call rather than pulling in a
+    dedicated SDK — Jina's endpoint is OpenAI-schema-compatible, so a
+    lightweight wrapper is all `langchain_chroma.Chroma` needs (it only
+    requires `embed_documents(texts) -> list[list[float]]` and
+    `embed_query(text) -> list[float]`).
+
+    A single request batches multiple texts, which keeps Chroma's own
+    ingestion batching (see EMBED_BATCH_SIZE below) as the only batching
+    layer to reason about.
+    """
+
+    def __init__(self, api_key: str, model: str, timeout: int = 60):
+        self.api_key = api_key
+        self.model = model
+        self.timeout = timeout
+
+    def _embed(self, texts: List[str], task: str) -> List[List[float]]:
+        if not texts:
+            return []
+        try:
+            response = requests.post(
+                JINA_EMBED_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": self.model, "input": texts, "task": task},
+                timeout=self.timeout,
+            )
+        except requests.RequestException as e:
+            raise RuntimeError(f"JinaEmbeddingError: could not reach Jina API: {e}") from e
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"JinaEmbeddingError: {response.status_code} {response.text[:500]}"
+            )
+
+        data = response.json()
+        # Jina returns `data` sorted by the `index` field, not necessarily
+        # input order under concurrent batching — sort defensively so a
+        # chunk's embedding always lines up with the chunk it was requested
+        # for.
+        items = sorted(data.get("data", []), key=lambda item: item.get("index", 0))
+        return [item["embedding"] for item in items]
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        # `retrieval.passage`: the adapter Jina trained for indexing long
+        # documents, as opposed to short queries — asymmetric retrieval
+        # models score better when document and query sides use their
+        # matching adapter rather than one adapter for both.
+        return self._embed(texts, task="retrieval.passage")
+
+    def embed_query(self, text: str) -> List[float]:
+        result = self._embed([text], task="retrieval.query")
+        return result[0] if result else []
+
 
 # ── FastAPI App Setup ──
 app = FastAPI(title="DocAgent RAG Backend", version="2.1")
@@ -129,45 +189,13 @@ app.add_middleware(
 )
 
 # ── Embedding & LLM Setup ──
-# Embeddings run locally (HuggingFace sentence-transformers), not through the
-# Gemini API. This removes the embedding path entirely from Gemini's quota —
-# ingestion does one API call per question, not per chunk. The LLM below still
-# uses Gemini for generation, so GEMINI_API_KEY is still required.
-#
-# `all-MiniLM-L6-v2` is fixed at 384 dimensions (no Matryoshka-style variable
-# output like `gemini-embedding-001`), so there is no dimensionality knob to
-# pin here — every call from this model produces 384-dim vectors by
-# construction, which is what keeps ingestion and query embeddings compatible.
-embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+embeddings = JinaEmbeddings(api_key=JINA_API_KEY, model=EMBEDDING_MODEL)
 
 vectorstore = Chroma(
     collection_name=COLLECTION_NAME,
     persist_directory=str(PERSIST_DIR),
     embedding_function=embeddings,
 )
-
-# Chroma persists to disk by design, so without this, every PDF ever
-# uploaded stays in the index forever — across restarts, across demos, across
-# unrelated test uploads. That grows the search space with increasingly
-# irrelevant vectors and causes "why is it citing a file I never uploaded
-# this session" confusion. RESET_DB_ON_START opts into a clean slate every
-# time the process starts — appropriate for a demo/single-operator
-# deployment where "session" == "server run". Defaults to true; set to
-# "false" in .env if uploaded documents should survive a restart instead.
-RESET_DB_ON_START = os.getenv("RESET_DB_ON_START", "true").strip().lower() not in (
-    "false", "0", "no",
-)
-if RESET_DB_ON_START:
-    try:
-        existing_ids = vectorstore.get(include=[]).get("ids") or []
-        if existing_ids:
-            vectorstore.delete(ids=existing_ids)
-            logger.info(
-                "RESET_DB_ON_START: cleared %d existing chunk(s) from '%s' on startup.",
-                len(existing_ids), COLLECTION_NAME,
-            )
-    except Exception:
-        logger.exception("RESET_DB_ON_START: failed to clear existing collection on startup.")
 
 llm = ChatGoogleGenerativeAI(
     model=LLM_MODEL,
@@ -379,98 +407,13 @@ def _coerce_answer(message: Any) -> str:
 _KEEP_METADATA = ("source", "page", "chunk_type")
 
 
-# ── OCR Helpers ──
-def _ocr_page(pdf_doc: "fitz.Document", page_index: int) -> str:
-    """Rasterize one page and run Tesseract on it.
-
-    Only called for pages PyMuPDF's text layer already failed on, so this
-    never runs on normal typed pages — it's purely the scanned/handwritten
-    fallback path, keeping ingestion of typed PDFs exactly as fast as before.
-    """
-    page = pdf_doc[page_index]
-    zoom = OCR_DPI / 72  # PyMuPDF's base unit is 72 DPI
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-    # Tesseract's default English-only model reads clean typed scans well,
-    # but does noticeably worse on handwriting. There's no free, reliably
-    # accurate handwriting-OCR engine to swap in here, so this is a
-    # best-effort pass — messy handwriting may still come out garbled, and
-    # that's a genuine limitation, not a bug being masked.
-    return pytesseract.image_to_string(img)
-
-
-def _extract_pdf_pages(file_path: str, filename: str) -> tuple[list, dict]:
-    """Extract text per page, OCR'ing any page whose text layer is empty or
-    near-empty (scanned image, or a page that's a photo of handwriting).
-
-    Returns (docs, page_stats) where docs is a list of langchain Documents
-    (one per page that ended up with usable text) and page_stats records how
-    many pages came from the text layer vs. OCR vs. were unrecoverable, so
-    the ingestion job can report this honestly instead of a flat
-    success/fail.
-    """
-    from langchain_core.documents import Document
-
-    loader = PyMuPDFLoader(file_path)
-    raw_docs = loader.load()  # one Document per page, 0-indexed page numbers
-
-    if not raw_docs:
-        raise ValueError("No pages could be read from this PDF.")
-
-    docs: list = []
-    stats = {"total_pages": len(raw_docs), "text_pages": 0, "ocr_pages": 0, "empty_pages": 0}
-
-    pdf_doc = None
-    try:
-        for i, raw in enumerate(raw_docs):
-            text = (raw.page_content or "").strip()
-
-            if len(text) >= MIN_CHARS_PER_PAGE:
-                stats["text_pages"] += 1
-                docs.append(raw)
-                continue
-
-            # This page's text layer is empty or near-empty: likely a scanned
-            # image, a photo of handwritten notes, or a blank/decorative
-            # page. Try OCR before giving up on it.
-            if not OCR_AVAILABLE:
-                stats["empty_pages"] += 1
-                continue
-
-            if pdf_doc is None:
-                pdf_doc = fitz.open(file_path)
-
-            try:
-                ocr_text = _ocr_page(pdf_doc, i).strip()
-            except Exception as e:
-                logger.warning("OCR failed on page %d of %s: %s", i + 1, filename, e)
-                ocr_text = ""
-
-            if len(ocr_text) >= MIN_CHARS_PER_PAGE:
-                stats["ocr_pages"] += 1
-                raw.page_content = ocr_text
-                raw.metadata["chunk_type"] = "ocr"
-                docs.append(raw)
-            else:
-                # Genuinely blank page, or handwriting OCR couldn't recover
-                # enough to be useful. Counted, not silently dropped.
-                stats["empty_pages"] += 1
-    finally:
-        if pdf_doc is not None:
-            pdf_doc.close()
-
-    return docs, stats
-
-
 def _clean_metadata(meta: dict, filename: str) -> dict:
     page = meta.get("page")
     cleaned = {
         "source": filename,
         # PyMuPDFLoader pages are 0-based; citations should read 1-based.
         "page": (page + 1) if isinstance(page, int) else 1,
-        # Preserve "ocr" if _extract_pdf_pages already tagged this page;
-        # otherwise it's normal extracted text.
-        "chunk_type": meta.get("chunk_type", "text"),
+        "chunk_type": "text",
     }
     return {k: cleaned[k] for k in _KEEP_METADATA}
 
@@ -493,27 +436,13 @@ def process_pdf_in_background(file_path: str, filename: str):
     try:
         ingestion_jobs[filename] = {"status": "processing", "filename": filename}
 
-        # 1. Load document, OCR'ing any page whose text layer is empty or
-        #    near-empty. Handles the mixed case (some typed pages, some
-        #    scanned/handwritten pages in the same PDF) as well as fully
-        #    scanned documents — previously a single page with no text
-        #    layer just produced an empty-content Document that silently
-        #    contributed nothing, with no indication that had happened.
-        docs, page_stats = _extract_pdf_pages(file_path, filename)
+        # 1. Load document (PyMuPDF is a C++-backed parser, significantly
+        #    faster than pypdf for large textbook-sized PDFs)
+        loader = PyMuPDFLoader(file_path)
+        docs = loader.load()
 
         if not docs:
-            if page_stats["empty_pages"] == page_stats["total_pages"] and not OCR_AVAILABLE:
-                raise ValueError(
-                    "No extractable text found on any page, and OCR is not "
-                    "available on this server (Tesseract is not installed). "
-                    "Install Tesseract OCR and the pytesseract/Pillow "
-                    "packages to support scanned or handwritten PDFs."
-                )
-            raise ValueError(
-                "No extractable text found on any page, even after OCR. "
-                "This PDF may be blank, corrupted, or contain handwriting "
-                "too unclear for OCR to recover."
-            )
+            raise ValueError("No pages could be read from this PDF.")
 
         # 2. Chunk text efficiently (larger chunks = fewer embedding API calls)
         text_splitter = RecursiveCharacterTextSplitter(
@@ -526,54 +455,70 @@ def process_pdf_in_background(file_path: str, filename: str):
         for chunk in chunks:
             chunk.metadata = _clean_metadata(chunk.metadata, filename)
 
-        # Chunking can still land on zero real chunks if every recovered
-        # page was just whitespace/punctuation that split_documents then
-        # dropped. Distinct from the docs-empty case above.
+        # A scanned/image-only PDF splits into zero usable chunks. Reporting
+        # "completed" for that was misleading — queries would find nothing.
         if not chunks:
             raise ValueError(
-                "Pages were read, but no usable text chunks were produced. "
-                "The document may contain only images, tables, or very "
-                "sparse text that couldn't be meaningfully split."
+                "No extractable text found. This PDF may be a scanned image; "
+                "OCR is required."
             )
 
         _drop_existing_chunks(filename)
 
-        # 4. Embed & insert into ChromaDB in batches. Embeddings run locally
-        #    now (HuggingFace), so there's no API quota/rate limit to retry
-        #    against — batching here is just to bound memory/latency per call
-        #    for very large documents, not to defend against transient
-        #    network failures.
-        BATCH_SIZE = 100
+        # 4. Embed & insert into ChromaDB in batches to avoid oversized
+        #    single requests and to keep memory/latency predictable for
+        #    large documents.
+        #
+        # Jina's free tier (100 RPM / 100K TPM) is generous enough that a
+        # single ingestion won't realistically trip it the way Gemini's
+        # embedding quota did — each batch is one HTTP call regardless of
+        # size, not one call per chunk. Batches still exist to bound memory
+        # and keep a single oversized request from timing out, and retries
+        # cover ordinary transient failures (a dropped connection, a brief
+        # 5xx) — not a quota wall, so plain exponential backoff is enough
+        # here, unlike the Gemini path this replaced.
+        BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "50"))
+        MAX_BATCH_RETRIES = int(os.getenv("EMBED_MAX_RETRIES", "3"))
         total_chunks = len(chunks)
         chunks_indexed = 0
 
         for i in range(0, total_chunks, BATCH_SIZE):
             batch = chunks[i:i + BATCH_SIZE]
-            try:
-                vectorstore.add_documents(batch)
-                chunks_indexed += len(batch)
-            except Exception as e:
+            last_err: Optional[Exception] = None
+            for attempt in range(1, MAX_BATCH_RETRIES + 1):
+                try:
+                    vectorstore.add_documents(batch)
+                    chunks_indexed += len(batch)
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(
+                        "Embedding batch %d-%d failed (attempt %d/%d) for %s: %s",
+                        i, i + len(batch), attempt, MAX_BATCH_RETRIES, filename, e,
+                    )
+                    if attempt < MAX_BATCH_RETRIES:
+                        is_rate_limited = "429" in str(e)
+                        # Jina's limit is per-minute like most providers; a
+                        # short fixed wait clears it without the multi-minute
+                        # stall Gemini's quota needed.
+                        time.sleep(15 if is_rate_limited else 2 ** (attempt - 1))
+            if last_err is not None:
                 # Keep whatever was already indexed instead of dropping it —
                 # a partial index is still queryable — but report the gap
                 # clearly rather than claiming full success.
                 raise RuntimeError(
-                    f"Embedding failed on chunks {i}-{i + len(batch)} of "
-                    f"{total_chunks} ({chunks_indexed} chunks were indexed "
-                    f"before this point): {type(e).__name__}: {e}"
+                    f"Embedding failed after {MAX_BATCH_RETRIES} attempts on "
+                    f"chunks {i}-{i + len(batch)} of {total_chunks} "
+                    f"({chunks_indexed} chunks were indexed before this point): "
+                    f"{type(last_err).__name__}: {last_err}"
                 )
 
-        # 5. Update completed status. Surfacing page_stats here (rather than
-        #    just "completed") is what makes a partially-scanned PDF visible
-        #    to the user — e.g. "40 pages, 3 recovered via OCR, 1 unreadable"
-        #    instead of a bare success that hides which pages didn't make it
-        #    into the index and therefore can't be queried.
+        # 5. Update completed status
         ingestion_jobs[filename] = {
             "status": "completed",
             "filename": filename,
-            "pages": page_stats["total_pages"],
-            "pages_from_text": page_stats["text_pages"],
-            "pages_from_ocr": page_stats["ocr_pages"],
-            "pages_unreadable": page_stats["empty_pages"],
+            "pages": len(docs),
             "chunks": total_chunks,
             "text_chunks": total_chunks,
             "visual_chunks": 0,
@@ -700,34 +645,6 @@ def query_documents(payload: QueryRequest):
     question = payload.query.strip()
 
     try:
-        # If the caller scoped the question to one document, check whether
-        # that document is still mid-ingestion or failed outright. Without
-        # this, a question asked seconds after upload silently returns "no
-        # relevant content found" — indistinguishable from a real empty
-        # result — instead of telling the user ingestion isn't done yet.
-        if payload.source:
-            job = ingestion_jobs.get(payload.source)
-            if job and job.get("status") == "processing":
-                return QueryResponse(
-                    query=question,
-                    answer=(
-                        f"'{payload.source}' is still being processed. "
-                        "Please wait for ingestion to complete before asking "
-                        "questions about it."
-                    ),
-                    sources=[],
-                )
-            if job and job.get("status") == "failed":
-                return QueryResponse(
-                    query=question,
-                    answer=(
-                        f"'{payload.source}' failed to ingest "
-                        f"({job.get('error', 'unknown error')}), so there is "
-                        "no content to search."
-                    ),
-                    sources=[],
-                )
-
         search_filter = {"source": payload.source} if payload.source else None
 
         # Use the scoring variant so responses can carry `relevance_score`,
@@ -754,47 +671,24 @@ def query_documents(payload: QueryRequest):
 
         context_parts = []
         sources = []
-        any_ocr = False
 
         for doc, score in scored:
-            chunk_type = doc.metadata.get("chunk_type", "text")
-            if chunk_type == "ocr":
-                any_ocr = True
-                # Tag OCR'd context inline so the model can weigh it
-                # appropriately — OCR output (especially from handwriting)
-                # can contain misreadings, and the model should be able to
-                # hedge on details from this text rather than repeat a
-                # possible misread with full confidence.
-                context_parts.append(
-                    f"[OCR-extracted text, may contain recognition errors]\n"
-                    f"{doc.page_content}"
-                )
-            else:
-                context_parts.append(doc.page_content)
-
+            context_parts.append(doc.page_content)
             page_num = doc.metadata.get("page", 1)
             sources.append(
                 SourceMetadata(
                     source=doc.metadata.get("source", "Document"),
                     page=page_num if isinstance(page_num, int) else 1,
-                    chunk_type=chunk_type,
+                    chunk_type=doc.metadata.get("chunk_type", "text"),
                     relevance_score=round(score, 4) if isinstance(score, (int, float)) else None,
                 )
             )
 
         context_text = "\n\n---\n\n".join(context_parts)
 
-        ocr_note = (
-            "\nSome context below was extracted via OCR from scanned or "
-            "handwritten pages and may contain recognition errors. If a "
-            "detail looks suspicious (e.g. a garbled word or number), say "
-            "so rather than stating it with full confidence.\n"
-            if any_ocr else ""
-        )
-
         prompt = f"""You are a helpful assistant analyzing user documents.
 Answer the following question using only the provided context below. If you do not know the answer based on the context, state that clearly.
-{ocr_note}
+
 Context:
 {context_text}
 
@@ -826,6 +720,21 @@ Answer:"""
             raise HTTPException(
                 status_code=503,
                 detail="Gemini API rejected the credentials. Check GOOGLE_API_KEY in .env.",
+            )
+        if "not_found" in message or "no longer available" in message:
+            # Google periodically retires model names outright (this has
+            # already happened twice for this project — 1.5-flash, then
+            # 2.5-flash). The error text from Google usually names the
+            # replacement, so surface it rather than a bare 500.
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"The configured Gemini model ('{LLM_MODEL}') is no longer "
+                    "available. Google's response: "
+                    f"{str(e)[:300]}. Update LLM_MODEL in .env to a model from "
+                    "GET https://generativelanguage.googleapis.com/v1beta/models"
+                    "?key=YOUR_KEY."
+                ),
             )
         raise HTTPException(
             status_code=500,
