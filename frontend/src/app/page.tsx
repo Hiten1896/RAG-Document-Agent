@@ -1,530 +1,1662 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import { Document as PdfDocument, Page as PdfPage, pdfjs } from 'react-pdf';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
+import { ingestDocument, checkIngestStatus, queryDocument, SourceMetadata } from '@/lib/api';
+import {
+  Send,
+  FileText,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+  Edit3,
+  X,
+  Image as ImageIcon,
+  Menu,
+  MessageSquarePlus,
+  Search,
+  FileUp,
+  Mic,
+  MicOff,
+  Sun,
+  Moon,
+  Plus,
+  PanelLeftClose,
+  PanelLeftOpen,
+  MoreHorizontal,
+  Trash2,
+  ChevronLeft,
+  ChevronRight,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
-function getSessionId(): string {
-  if (typeof window === 'undefined') return 'server_side_session';
-  let sessionId = sessionStorage.getItem('rag_session_id');
-  if (!sessionId) {
-    sessionId = crypto.randomUUID();
-    sessionStorage.setItem('rag_session_id', sessionId);
-  }
-  return sessionId;
-}
-
-function createNewChatId(): string {
-  return crypto.randomUUID();
-}
-
-interface UploadedFile {
-  id: string;
-  name: string;
-  isUploading: boolean;
-  fileObj?: File;
-}
-
+/* ───── Types ───── */
 interface Message {
-  id: string;
   sender: 'user' | 'agent';
   text: string;
-  files?: string[];
-  sourcesCount?: number;
+  sources?: SourceMetadata[];
+  attachedFiles?: string[];
 }
 
-// Time-of-day based greetings (4 time buckets, 5 lines each)
-const GREETINGS = {
-  morning: [
-    "Good morning! Ready to analyze your docs?",
-    "Rise and shine! Let's dive into your papers.",
-    "Morning! Drop your files and ask away.",
-    "Early start! How can I assist you today?",
-    "Good morning! Let's get through these documents."
-  ],
-  afternoon: [
-    "Good afternoon! What are we reviewing today?",
-    "Hope your day is going well! Ready for queries.",
-    "Afternoon! Let's process some documents.",
-    "Good afternoon! Upload a file or ask a question.",
-    "Ready when you are. What's on your agenda?"
-  ],
-  evening: [
-    "Good evening! Let's finish up today's research.",
-    "Evening! Ready to explore your documents.",
-    "Winding down or starting up? I'm ready to help.",
-    "Good evening! Drop your PDFs here.",
-    "Evening! Ask me anything about your files."
-  ],
-  night: [
-    "Burning the midnight oil.",
-    "Late one, huh? Let's analyze your docs.",
-    "Working late? I'm right here with you.",
-    "Night owl mode activated. How can I help?",
-    "Still up? Let's crack these papers open."
-  ]
-};
+interface IngestedFile {
+  name: string;
+  status: 'processing' | 'completed' | 'failed';
+  pages?: number;
+  chunks?: number;
+  error?: string;
+  file?: File;
+}
 
-function getRandomGreeting(): string {
-  const hour = new Date().getHours();
-  let category: keyof typeof GREETINGS = 'afternoon';
+interface Conversation {
+  id: string;
+  title: string;
+  messages: Message[];
+  titleGenerated?: boolean;
+}
 
-  if (hour >= 5 && hour < 12) {
-    category = 'morning';
-  } else if (hour >= 12 && hour < 17) {
-    category = 'afternoon';
-  } else if (hour >= 17 && hour < 22) {
-    category = 'evening';
-  } else {
-    category = 'night';
+function makeConversationId(): string {
+  return `c_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function titleFromQuery(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
+}
+
+async function generateChatTitle(message: string): Promise<string | null> {
+  const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+  try {
+    const res = await fetch(`${API}/title`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message }),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const title = typeof data?.title === 'string' ? data.title.trim() : '';
+    return title || null;
+  } catch {
+    return null;
   }
-
-  const list = GREETINGS[category];
-  return list[Math.floor(Math.random() * list.length)];
 }
 
-export default function ChatPage() {
-  const [sessionId, setSessionId] = useState<string>('');
-  const [chatId, setChatId] = useState<string>('');
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [inputQuery, setInputQuery] = useState('');
-  const [attachedFiles, setAttachedFiles] = useState<UploadedFile[]>([]);
-  const [isQuerying, setIsQuerying] = useState(false);
-  const [activePdfUrl, setActivePdfUrl] = useState<string | null>(null);
-  const [greeting, setGreeting] = useState<string>('Burning the midnight oil.');
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isDarkMode, setIsDarkMode] = useState(false);
+function DocAgentMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 40 40" className={className} xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DocAgent">
+      <defs>
+        <linearGradient id="docagent-mark-grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#4f46e5" />
+          <stop offset="100%" stopColor="#8b5cf6" />
+        </linearGradient>
+      </defs>
+      <rect width="40" height="40" rx="10" fill="url(#docagent-mark-grad)" />
+      <path
+        d="M12 9.5c0-.83.67-1.5 1.5-1.5H21l6 6v16.5c0 .83-.67 1.5-1.5 1.5h-12A1.5 1.5 0 0 1 12 30.5v-21Z"
+        fill="white"
+        fillOpacity="0.95"
+      />
+      <path d="M21 8v4.5c0 .83.67 1.5 1.5 1.5H27" fill="none" stroke="#4f46e5" strokeOpacity="0.35" strokeWidth="1.4" />
+      <line x1="15.5" y1="19" x2="23.5" y2="19" stroke="#4f46e5" strokeOpacity="0.55" strokeWidth="1.6" strokeLinecap="round" />
+      <line x1="15.5" y1="23" x2="23.5" y2="23" stroke="#4f46e5" strokeOpacity="0.55" strokeWidth="1.6" strokeLinecap="round" />
+      <line x1="15.5" y1="27" x2="20" y2="27" stroke="#4f46e5" strokeOpacity="0.35" strokeWidth="1.6" strokeLinecap="round" />
+      <path
+        d="M27 8.5l1.1 2.4 2.4 1.1-2.4 1.1-1.1 2.4-1.1-2.4-2.4-1.1 2.4-1.1L27 8.5Z"
+        fill="white"
+      />
+    </svg>
+  );
+}
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+function getErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err.trim()) return err;
+  if (err && typeof err === 'object') {
+    const maybeDetail = (err as { detail?: unknown }).detail;
+    if (typeof maybeDetail === 'string' && maybeDetail.trim()) return maybeDetail;
+    const maybeMessage = (err as { message?: unknown }).message;
+    if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function ChatComposer({
+  query,
+  setQuery,
+  onSubmit,
+  loading,
+  onTriggerUpload,
+  onMicClick,
+  listening,
+  pendingAttachments,
+  setPendingAttachments,
+  ingestedFiles,
+  handleRetryIngest,
+  floating = false,
+}: {
+  query: string;
+  setQuery: (v: string) => void;
+  onSubmit: (e?: React.FormEvent) => void;
+  loading: boolean;
+  onTriggerUpload: (e?: React.MouseEvent) => void;
+  onMicClick: (e?: React.MouseEvent) => void;
+  listening: boolean;
+  pendingAttachments: string[];
+  setPendingAttachments: React.Dispatch<React.SetStateAction<string[]>>;
+  ingestedFiles: IngestedFile[];
+  handleRetryIngest: (f: IngestedFile) => void;
+  floating?: boolean;
+}) {
+  return (
+    <div>
+      {pendingAttachments.length > 0 && (
+        <div className="flex flex-wrap gap-2.5 mb-3">
+          {pendingAttachments.map((fname, idx) => {
+            const fileInfo = ingestedFiles.find((f) => f.name === fname);
+            const status = fileInfo?.status ?? 'processing';
+            const baseName = fname.replace(/\.pdf$/i, '');
+
+            return (
+              <div
+                key={idx}
+                className={`relative group w-[168px] rounded-xl border p-2.5 shadow-sm transition ${
+                  status === 'failed'
+                    ? 'bg-red-500/5 border-red-500/30'
+                    : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => setPendingAttachments((prev) => prev.filter((n) => n !== fname))}
+                  className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-slate-700 dark:bg-slate-600 text-white opacity-0 group-hover:opacity-100 transition shadow-md cursor-pointer"
+                  aria-label={`Remove ${fname}`}
+                  title="Remove"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+
+                <div
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center mb-2 ${
+                    status === 'failed'
+                      ? 'bg-red-500/15 text-red-500 dark:text-red-400'
+                      : 'bg-indigo-600/10 text-indigo-600 dark:text-indigo-400'
+                  }`}
+                >
+                  {status === 'processing' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : status === 'failed' ? (
+                    <AlertCircle className="w-4 h-4" />
+                  ) : (
+                    <FileText className="w-4 h-4" />
+                  )}
+                </div>
+
+                <p
+                  className="text-xs font-medium text-slate-800 dark:text-slate-200 leading-snug line-clamp-2 break-words"
+                  title={fname}
+                >
+                  {baseName}
+                </p>
+
+                <div className="mt-1.5 flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+                    PDF
+                  </span>
+                  {status === 'failed' ? (
+                    <button
+                      type="button"
+                      onClick={() => fileInfo && handleRetryIngest(fileInfo)}
+                      className="text-[10px] font-semibold text-red-600 dark:text-red-300 hover:text-red-700 dark:hover:text-red-200 underline decoration-dotted underline-offset-2 cursor-pointer"
+                      title={fileInfo?.error || 'Retry ingestion'}
+                    >
+                      Retry
+                    </button>
+                  ) : status === 'completed' ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
+                  ) : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <form onSubmit={onSubmit} className="flex gap-2 sm:gap-3">
+        <button
+          type="button"
+          onClick={onTriggerUpload}
+          className={`bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer ${
+            floating ? 'shadow-sm' : ''
+          }`}
+          aria-label="Add PDF documents"
+          title="Add PDF documents"
+        >
+          <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
+        </button>
+
+        <div className="relative flex-1 flex items-center min-w-0">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Ask about text, tables, or diagrams..."
+            className={`w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-11 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 ${
+              floating ? 'shadow-md' : 'shadow-inner'
+            }`}
+            autoFocus={floating}
+          />
+
+          <button
+            type="button"
+            onClick={onMicClick}
+            className={`absolute right-3 p-1.5 rounded-lg transition cursor-pointer z-10 ${
+              listening
+                ? 'bg-red-500 text-white animate-pulse'
+                : 'text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800'
+            }`}
+            title={listening ? 'Stop listening' : 'Voice input'}
+          >
+            <Mic className="w-4 h-4" />
+          </button>
+        </div>
+
+        <button
+          type="submit"
+          disabled={loading || !query.trim()}
+          className="bg-gradient-to-tr from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 disabled:from-slate-300 dark:disabled:from-slate-800 disabled:to-slate-300 dark:disabled:to-slate-800 disabled:text-slate-400 dark:disabled:text-slate-600 text-white px-4 sm:px-6 rounded-xl sm:rounded-2xl transition duration-200 flex items-center justify-center shadow-lg shadow-indigo-600/20 font-medium text-sm shrink-0 cursor-pointer disabled:cursor-not-allowed"
+        >
+          <Send className="w-4 h-4" />
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function PdfPreview({
+  fileUrl,
+  initialPage,
+  fileName,
+}: {
+  fileUrl: string;
+  initialPage: number | null;
+  fileName: string;
+}) {
+  const [numPages, setNumPages] = useState<number | null>(null);
+  const [pageNumber, setPageNumber] = useState(initialPage && initialPage > 0 ? initialPage : 1);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setSessionId(getSessionId());
-    setChatId(createNewChatId());
-    setGreeting(getRandomGreeting());
+    setPageNumber(initialPage && initialPage > 0 ? initialPage : 1);
+    setLoadError(null);
+    setZoom(1);
+  }, [fileUrl, initialPage]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width;
+      if (width) setContainerWidth(width);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const goToPage = (delta: number) => {
+    setPageNumber((prev) => {
+      const next = prev + delta;
+      if (next < 1) return 1;
+      if (numPages && next > numPages) return numPages;
+      return next;
+    });
+  };
+
+  const pageWidth = containerWidth > 0 ? Math.min(containerWidth - 24, 900) * zoom : undefined;
+
+  return (
+    <div className="flex flex-col h-full min-h-0">
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-auto bg-slate-100 dark:bg-slate-950 flex justify-center">
+        {loadError ? (
+          <div className="flex flex-col items-center justify-center gap-2 text-center px-6 py-16 text-sm text-slate-500 dark:text-slate-400">
+            <AlertCircle className="w-6 h-6 text-red-500 dark:text-red-400" />
+            <p>Couldn&apos;t render this PDF for preview.</p>
+            <p className="text-xs text-slate-400 dark:text-slate-600">{loadError}</p>
+          </div>
+        ) : (
+          <PdfDocument
+            file={fileUrl}
+            onLoadSuccess={({ numPages: n }) => setNumPages(n)}
+            onLoadError={(err) => setLoadError(err?.message || 'Unknown error')}
+            loading={
+              <div className="flex flex-col items-center justify-center gap-2 py-20 text-sm text-slate-400 dark:text-slate-500">
+                <Loader2 className="w-5 h-5 animate-spin" />
+                Loading preview…
+              </div>
+            }
+            className="py-3"
+          >
+            {containerWidth > 0 && (
+              <PdfPage
+                pageNumber={pageNumber}
+                width={pageWidth}
+                className="shadow-md dark:shadow-black/40 rounded-md overflow-hidden"
+                loading={
+                  <div className="flex items-center justify-center py-16 text-slate-400 dark:text-slate-500">
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  </div>
+                }
+              />
+            )}
+          </PdfDocument>
+        )}
+      </div>
+
+      {!loadError && numPages !== null && (
+        <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/80 shrink-0">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => goToPage(-1)}
+              disabled={pageNumber <= 1}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+              aria-label="Previous page"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <span className="text-xs font-medium text-slate-600 dark:text-slate-300 tabular-nums px-1 min-w-[64px] text-center">
+              {pageNumber} / {numPages}
+            </span>
+            <button
+              type="button"
+              onClick={() => goToPage(1)}
+              disabled={numPages !== null && pageNumber >= numPages}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+              aria-label="Next page"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.2).toFixed(2)))}
+              disabled={zoom <= 0.5}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+              aria-label="Zoom out"
+            >
+              <ZoomOut className="w-4 h-4" />
+            </button>
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400 tabular-nums w-10 text-center">
+              {Math.round(zoom * 100)}%
+            </span>
+            <button
+              type="button"
+              onClick={() => setZoom((z) => Math.min(2.5, +(z + 0.2).toFixed(2)))}
+              disabled={zoom >= 2.5}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+              aria-label="Zoom in"
+            >
+              <ZoomIn className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function Home() {
+  const [ingestedFiles, setIngestedFiles] = useState<IngestedFile[]>([]);
+  const [uploading, setUploading] = useState(false);
+
+  const [conversations, setConversations] = useState<Conversation[]>(() => [
+    { id: makeConversationId(), title: 'New Chat', messages: [] },
+  ]);
+  const [activeConversationId, setActiveConversationId] = useState<string>(
+    () => conversations[0].id
+  );
+
+  const activeConversation =
+    conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
+  const messages = activeConversation.messages;
+
+  const setMessagesForActive = useCallback(
+    (updater: (prev: Message[]) => Message[]) => {
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id !== activeConversationId) return c;
+          const nextMessages = updater(c.messages);
+          const firstUserMsg = nextMessages.find((m) => m.sender === 'user');
+          const nextTitle =
+            c.title === 'New Chat' && firstUserMsg && !c.titleGenerated
+              ? titleFromQuery(firstUserMsg.text)
+              : c.title;
+          return { ...c, messages: nextMessages, title: nextTitle };
+        })
+      );
+    },
+    [activeConversationId]
+  );
+
+  const requestAiTitle = useCallback(async (conversationId: string, firstMessage: string) => {
+    const aiTitle = await generateChatTitle(firstMessage);
+    if (!aiTitle) return;
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === conversationId && !c.titleGenerated
+          ? { ...c, title: aiTitle, titleGenerated: true }
+          : c
+      )
+    );
+  }, []);
+
+  const [pendingAttachments, setPendingAttachments] = useState<string[]>([]);
+  const [viewerFile, setViewerFile] = useState<string | null>(null);
+  const [viewerUrl, setViewerUrl] = useState<string | null>(null);
+  const [viewerPage, setViewerPage] = useState<number | null>(null);
+
+  const openFileViewer = useCallback(
+    (fname: string, page?: number) => {
+      const match = ingestedFiles.find((f) => f.name === fname && f.file);
+      if (!match?.file) return;
+      const url = URL.createObjectURL(match.file);
+      setViewerUrl((prevUrl) => {
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        return url;
+      });
+      setViewerFile(fname);
+      setViewerPage(page ?? null);
+    },
+    [ingestedFiles]
+  );
+
+  const closeFileViewer = useCallback(() => {
+    setViewerFile(null);
+    setViewerPage(null);
+    setViewerUrl((prevUrl) => {
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      return null;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      setViewerUrl((prevUrl) => {
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        return prevUrl;
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (!viewerFile) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [viewerFile]);
+
+  /* ───── 4 Time Periods & Exactly 5 Greetings per Period ───── */
+  const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
+    morning: [
+      { headline: 'Good morning.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Morning. Ready when you are.', subtext: 'Upload a document or ask about one already shared, and I’ll dig in.' },
+      { headline: 'Rise and shine.', subtext: 'Bring a PDF, or ask about the ones already here — text, tables, or diagrams.' },
+      { headline: 'Morning. Let’s get into it.', subtext: 'Share a document to start, or ask about one you’ve already uploaded.' },
+      { headline: 'Good morning — first thing on the list?', subtext: 'Drop in a PDF, or ask about text, tables, or diagrams within one.' },
+    ],
+    afternoon: [
+      { headline: 'Good afternoon.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Afternoon. What are we digging into?', subtext: 'Share a document or pick up where an earlier one left off.' },
+      { headline: 'Good afternoon — what can I help with?', subtext: 'Text, tables, diagrams — ask about anything you’ve shared.' },
+      { headline: 'Afternoon. Ready when you are.', subtext: 'Upload a PDF, or ask about one that’s already here.' },
+      { headline: 'Good afternoon — let’s take a look.', subtext: 'Drop in a document and I’ll help you work through it.' },
+    ],
+    evening: [
+      { headline: 'Good evening.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Evening. What can I help with?', subtext: 'Upload something new or ask about a document already on hand.' },
+      { headline: 'Good evening — let’s take a look.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
+      { headline: 'Evening. Ready when you are.', subtext: 'Drop in a document to get started, or pick up an earlier one.' },
+      { headline: 'Good evening — what’s on the list?', subtext: 'Share a PDF and I’ll help you get through it.' },
+    ],
+    night: [
+      { headline: 'Still up? What can I help with?', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
+      { headline: 'Working late?', subtext: 'Share a document and I’ll help you get through it.' },
+      { headline: 'Burning the midnight oil.', subtext: 'Upload a PDF or ask about one already shared — I’m here.' },
+      { headline: 'Late one, huh?', subtext: 'Drop in a document, or ask about one you’ve already shared.' },
+      { headline: 'Still up. Let’s make it count.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
+    ],
+  };
+
+  const [greeting, setGreeting] = useState('');
+  const [greetingSubtext, setGreetingSubtext] = useState(
+    "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared."
+  );
+
+  useEffect(() => {
+    const hour = new Date().getHours();
+    const period: keyof typeof GREETINGS =
+      hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
+    const pool = GREETINGS[period];
+
+    const storageKey = `docagent_greeting_idx_${period}`;
+    let nextIndex = 0;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      const parsed = stored !== null ? parseInt(stored, 10) : -1;
+      nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
+      window.localStorage.setItem(storageKey, String(nextIndex));
+    } catch {
+      nextIndex = 0;
+    }
+
+    const pick = pool[nextIndex];
+    setGreeting(pick.headline);
+    setGreetingSubtext(pick.subtext);
+  }, []);
+
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editText, setEditText] = useState('');
+
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(true);
+  const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const chatMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!openMenuId) return;
+    const onClickAway = (e: MouseEvent) => {
+      if (chatMenuRef.current && !chatMenuRef.current.contains(e.target as Node)) {
+        setOpenMenuId(null);
+      }
+    };
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpenMenuId(null);
+    };
+    document.addEventListener('mousedown', onClickAway);
+    document.addEventListener('keydown', onEscape);
+    return () => {
+      document.removeEventListener('mousedown', onClickAway);
+      document.removeEventListener('keydown', onEscape);
+    };
+  }, [openMenuId]);
+
+  const MIN_VIEWER_WIDTH = 320;
+  const CLOSE_DRAG_THRESHOLD = 220;
+  const [viewerWidth, setViewerWidth] = useState(440);
+  const viewerResizingRef = useRef(false);
+
+  const startViewerResize = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    viewerResizingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      if (!viewerResizingRef.current) return;
+      const next = window.innerWidth - e.clientX;
+      const clamped = Math.min(Math.max(next, CLOSE_DRAG_THRESHOLD), Math.round(window.innerWidth * 0.7));
+      setViewerWidth(clamped);
+    };
+    const onUp = (e: MouseEvent) => {
+      if (!viewerResizingRef.current) return;
+      viewerResizingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+
+      const next = window.innerWidth - e.clientX;
+      if (next < MIN_VIEWER_WIDTH) {
+        closeFileViewer();
+        setViewerWidth(440);
+      } else {
+        setViewerWidth(Math.min(next, Math.round(window.innerWidth * 0.7)));
+      }
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [closeFileViewer]);
+
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+
+  const applyTheme = (targetTheme: 'dark' | 'light') => {
+    const root = document.documentElement;
+    if (targetTheme === 'dark') {
+      root.classList.add('dark');
+      root.classList.remove('light');
+      root.setAttribute('data-theme', 'dark');
+    } else {
+      root.classList.remove('dark');
+      root.classList.add('light');
+      root.setAttribute('data-theme', 'light');
+    }
+  };
+
+  useEffect(() => {
+    const root = document.documentElement;
+    setTheme(root.classList.contains('light') ? 'light' : 'dark');
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+
+    const media = window.matchMedia('(prefers-color-scheme: light)');
+    const onChange = (event: MediaQueryListEvent) => {
+      try {
+        if (localStorage.getItem('docagent_theme')) return;
+      } catch {}
+      const next = event.matches ? 'light' : 'dark';
+      setTheme(next);
+      applyTheme(next);
+    };
+
+    media.addEventListener('change', onChange);
+    return () => media.removeEventListener('change', onChange);
+  }, []);
+
+  const toggleTheme = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+    applyTheme(nextTheme);
+
+    try {
+      localStorage.setItem('docagent_theme', nextTheme);
+    } catch {}
+  };
+
+  const [listening, setListening] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const recognitionRef = useRef<any>(null);
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {}
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!micError) return;
+    const id = setTimeout(() => setMicError(null), 4000);
+    return () => clearTimeout(id);
+  }, [micError]);
+
+  const handleMicClick = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    if (typeof window === 'undefined') return;
+    const SpeechRecognitionCtor =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setMicError('Voice search is not supported in this browser.');
+      return;
+    }
+
+    if (listening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {}
+      setListening(false);
+      return;
+    }
+
+    setMicError(null);
+    try {
+      const recognition = new SpeechRecognitionCtor();
+      recognition.continuous = false;
+      recognition.lang = 'en-US';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onresult = (event: any) => {
+        const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
+        if (transcript.trim()) {
+          setQuery(transcript.trim());
+        }
+      };
+
+      recognition.onend = () => {
+        setListening(false);
+      };
+
+      recognition.onerror = (event: any) => {
+        setListening(false);
+        const code = event?.error;
+        if (code === 'not-allowed' || code === 'service-not-allowed') {
+          setMicError('Microphone access was denied. Please allow mic permission.');
+        } else if (code === 'no-speech') {
+          setMicError("Didn't catch that — try speaking again.");
+        } else {
+          setMicError('Voice search failed. Please try again.');
+        }
+      };
+
+      recognition.start();
+      recognitionRef.current = recognition;
+      setListening(true);
+    } catch {
+      setListening(false);
+    }
+  };
+
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const pollTokenRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      pollTokenRef.current++;
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, loading]);
 
-  const hasUploadingFile = attachedFiles.some((f) => f.isUploading);
+  useEffect(() => {
+    const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+    let mounted = true;
 
-  const handleNewChat = async () => {
-    if (sessionId && chatId) {
+    const check = async () => {
       try {
-        await fetch(`${API_BASE_URL}/api/session/clear`, {
-          method: 'DELETE',
-          headers: { 'X-Session-ID': sessionId, 'X-Chat-ID': chatId },
-        });
-      } catch (err) {
-        console.error('Failed to clear session:', err);
+        const res = await fetch(API, { signal: AbortSignal.timeout(3000) });
+        if (mounted) setBackendOnline(res.ok);
+      } catch {
+        if (mounted) setBackendOnline(false);
       }
-    }
-    setChatId(createNewChatId());
-    setMessages([]);
-    setAttachedFiles([]);
-    setActivePdfUrl(null);
-    setGreeting(getRandomGreeting());
-  };
-
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const fileId = crypto.randomUUID();
-    const newFileBadge: UploadedFile = {
-      id: fileId,
-      name: file.name,
-      isUploading: true,
-      fileObj: file,
     };
 
-    setAttachedFiles((prev) => [...prev, newFileBadge]);
+    check();
+    const id = setInterval(check, 30_000);
+    return () => {
+      mounted = false;
+      clearInterval(id);
+    };
+  }, []);
 
-    if (file.type === 'application/pdf') {
-      const pdfBlobUrl = URL.createObjectURL(file);
-      setActivePdfUrl(pdfBlobUrl);
-    }
-
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/ingest`, {
-        method: 'POST',
-        headers: {
-          'X-Session-ID': sessionId,
-          'X-Chat-ID': chatId,
-        },
-        body: formData,
-      });
-
-      if (response.ok) {
-        setAttachedFiles((prev) =>
-          prev.map((f) => (f.id === fileId ? { ...f, isUploading: false } : f))
-        );
-      } else {
-        const data = await response.json();
-        alert(`Ingestion failed: ${data.detail || 'Error uploading file'}`);
-        removeFile(fileId);
-      }
-    } catch (err) {
-      alert('Network error while processing file.');
-      removeFile(fileId);
-    } finally {
-      if (fileInputRef.current) fileInputRef.current.value = '';
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(e.target.files ?? []);
+    e.target.value = '';
+    if (selectedFiles.length) {
+      await ingestMultiple(selectedFiles);
     }
   };
 
-  const removeFile = (fileId: string) => {
-    setAttachedFiles((prev) => prev.filter((f) => f.id !== fileId));
+  const handleTriggerUpload = (e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    fileInputRef.current?.click();
   };
 
-  const handleSendQuery = async (e: React.FormEvent) => {
+  const onDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
+    e.stopPropagation();
+    setDragOver(true);
+  }, []);
 
-    // Prevent submission if a file is currently ingesting
-    if (hasUploadingFile) {
-      alert('Please wait for document ingestion to finish or remove loading files before sending.');
-      return;
+  const onDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+  }, []);
+
+  const onDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+
+    const droppedFiles = Array.from(e.dataTransfer.files ?? []);
+    if (droppedFiles.length) {
+      await ingestMultiple(droppedFiles);
     }
+  }, []);
 
-    if (!inputQuery.trim() || isQuerying) return;
+  const ingestMultiple = async (files: File[]) => {
+    const pdfFiles = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
 
-    const currentFileNames = attachedFiles.map((f) => f.name);
-    const userMsg: Message = {
-      id: crypto.randomUUID(),
-      sender: 'user',
-      text: inputQuery,
-      files: currentFileNames.length > 0 ? currentFileNames : undefined,
-    };
+    const newFiles = pdfFiles.filter((f) => {
+      const existing = ingestedFiles.find((ef) => ef.name === f.name);
+      return !existing || existing.status === 'failed';
+    });
 
-    setMessages((prev) => [...prev, userMsg]);
-    const query = inputQuery;
-    setInputQuery('');
-    setIsQuerying(true);
+    if (!newFiles.length) return;
+
+    setSidebarOpen(false);
+    setUploading(true);
+    await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
+    setUploading(false);
+  };
+
+  const triggerAutoIngest = async (fileToIngest: File) => {
+    const name = fileToIngest.name;
+    const pollToken = ++pollTokenRef.current;
+    const isStale = () => pollTokenRef.current !== pollToken;
+
+    setIngestedFiles((prev) => [
+      ...prev.filter((f) => f.name !== name),
+      { name, status: 'processing', file: fileToIngest },
+    ]);
+    setPendingAttachments((prev) => (prev.includes(name) ? prev : [...prev, name]));
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/query`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Session-ID': sessionId,
-          'X-Chat-ID': chatId,
-        },
-        body: JSON.stringify({ query }),
-      });
+      const res = await ingestDocument(fileToIngest);
+      if (isStale()) return;
 
-      const data = await response.json();
+      let attempts = 0;
+      const maxAttempts = 60;
 
-      if (response.ok) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            sender: 'agent',
-            text: data.answer || data.response || 'No answer returned.',
-            sourcesCount: data.sources_count,
-          },
-        ]);
-      } else {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            sender: 'agent',
-            text: `Error processing your request: ${data.detail || 'Not Found'}`,
-          },
-        ]);
-      }
-    } catch (err) {
-      setMessages((prev) => [
+      const poll = async () => {
+        if (isStale()) return;
+        try {
+          const statusRes = await checkIngestStatus(res.filename);
+          if (isStale()) return;
+
+          if (statusRes.status === 'completed') {
+            setIngestedFiles((prev) =>
+              prev.map((f) =>
+                f.name === name
+                  ? { ...f, status: 'completed', pages: statusRes.pages, chunks: statusRes.chunks }
+                  : f
+              )
+            );
+          } else if (statusRes.status === 'failed') {
+            setIngestedFiles((prev) =>
+              prev.map((f) =>
+                f.name === name ? { ...f, status: 'failed', error: statusRes.error } : f
+              )
+            );
+          } else {
+            attempts++;
+            if (attempts < maxAttempts) {
+              pollTimerRef.current = setTimeout(poll, 1000);
+            } else {
+              setIngestedFiles((prev) =>
+                prev.map((f) =>
+                  f.name === name
+                    ? { ...f, status: 'failed', error: 'Timed out waiting for the backend to finish indexing.' }
+                    : f
+                )
+              );
+            }
+          }
+        } catch (err: unknown) {
+          if (isStale()) return;
+          const message = getErrorMessage(err, 'Could not reach the status endpoint.');
+          setIngestedFiles((prev) =>
+            prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
+          );
+        }
+      };
+
+      pollTimerRef.current = setTimeout(poll, 800);
+    } catch (err: unknown) {
+      if (isStale()) return;
+      const message = getErrorMessage(err, 'Failed to communicate with backend.');
+      setIngestedFiles((prev) =>
+        prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
+      );
+    }
+  };
+
+  const handleRetryIngest = (fileToRetry: IngestedFile) => {
+    if (!fileToRetry.file) return;
+    triggerAutoIngest(fileToRetry.file);
+  };
+
+  const handleSendQuery = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!query.trim() || loading) return;
+
+    const userText = query.trim();
+    const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
+    const targetConversationId = activeConversationId;
+    const isFirstUserMessage =
+      !activeConversation.titleGenerated &&
+      !activeConversation.messages.some((m) => m.sender === 'user');
+
+    setQuery('');
+    setPendingAttachments([]);
+    setMessagesForActive((prev) => [
+      ...prev,
+      { sender: 'user', text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
+    ]);
+    setLoading(true);
+
+    if (isFirstUserMessage) {
+      requestAiTitle(targetConversationId, userText);
+    }
+
+    try {
+      const res = await queryDocument(userText);
+      setMessagesForActive((prev) => [
         ...prev,
-        {
-          id: crypto.randomUUID(),
-          sender: 'agent',
-          text: 'Error processing your request: Network Connection Failed',
-        },
+        { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+      ]);
+    } catch (err: unknown) {
+      const message = getErrorMessage(err, 'Unknown error');
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'agent', text: `Error processing your request: ${message}` },
       ]);
     } finally {
-      setIsQuerying(false);
+      setLoading(false);
     }
   };
 
+  const handleStartEdit = (index: number, currentText: string) => {
+    setEditingIndex(index);
+    setEditText(currentText);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingIndex(null);
+    setEditText('');
+  };
+
+  const handleSaveEdit = async (targetIndex: number) => {
+    if (!editText.trim() || loading) return;
+
+    const updatedQuery = editText.trim();
+    const targetConversationId = activeConversationId;
+    const isEditingFirstUserMessage = targetIndex === 1;
+    setEditingIndex(null);
+    setEditText('');
+
+    setMessagesForActive((prev) => {
+      const sliced = prev.slice(0, targetIndex);
+      sliced.push({ sender: 'user', text: updatedQuery });
+      return sliced;
+    });
+
+    if (isEditingFirstUserMessage) {
+      setConversations((prev) =>
+        prev.map((c) => (c.id === targetConversationId ? { ...c, titleGenerated: false } : c))
+      );
+      requestAiTitle(targetConversationId, updatedQuery);
+    }
+
+    setLoading(true);
+    try {
+      const res = await queryDocument(updatedQuery);
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+      ]);
+    } catch (err: unknown) {
+      const message = getErrorMessage(err, 'Unknown error');
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'agent', text: `Error regenerating answer: ${message}` },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleNewChat = () => {
+    const newConversation: Conversation = {
+      id: makeConversationId(),
+      title: 'New Chat',
+      messages: [],
+    };
+    setConversations((prev) => [newConversation, ...prev]);
+    setActiveConversationId(newConversation.id);
+    setEditingIndex(null);
+    setEditText('');
+    setQuery('');
+  };
+
+  const handleSwitchConversation = (id: string) => {
+    if (id === activeConversationId) return;
+    setActiveConversationId(id);
+    setEditingIndex(null);
+    setEditText('');
+    setQuery('');
+  };
+
+  const handleDeleteConversation = (id: string) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      if (id === activeConversationId) {
+        if (next.length > 0) {
+          setActiveConversationId(next[0].id);
+        } else {
+          const fresh: Conversation = { id: makeConversationId(), title: 'New Chat', messages: [] };
+          setActiveConversationId(fresh.id);
+          return [fresh];
+        }
+      }
+      return next;
+    });
+    setOpenMenuId(null);
+  };
+
+  const getDeduplicatedSources = (sources: SourceMetadata[] = []) => {
+    const seen = new Set<string>();
+    const result: SourceMetadata[] = [];
+    for (const src of sources) {
+      const key = `${src.source || 'Doc'}-${src.page || '1'}-${src.chunk_type || 'text'}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(src);
+      }
+    }
+    return result;
+  };
+
+  const isEmptyChat = messages.length === 0;
+
   return (
-    <div className={`flex h-screen w-screen font-sans overflow-hidden ${isDarkMode ? 'bg-[#0f172a] text-white' : 'bg-[#f8fafc] text-gray-800'}`}>
-      
-      {/* Sidebar - Fixed width with no flex transitions to eliminate shaking */}
-      {isSidebarOpen && (
-        <aside className={`w-64 border-r p-5 flex flex-col justify-between shrink-0 select-none ${isDarkMode ? 'bg-[#1e293b] border-gray-700' : 'bg-white border-gray-100'}`}>
-          <div className="space-y-6">
-            {/* Logo */}
-            <div className="flex items-center space-x-3 px-1">
-              <div className="w-9 h-9 bg-[#6366f1] rounded-xl flex items-center justify-center text-white shadow-md shadow-indigo-200">
-                <svg className="w-5 h-5 fill-current" viewBox="0 0 24 24">
-                  <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
-                </svg>
-              </div>
-              <span className={`font-bold text-base tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>DocAgent RAG</span>
+    <div className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/pdf,.pdf"
+        onChange={handleFileChange}
+        className="hidden"
+        id="file-auto-upload"
+        multiple
+      />
+
+      {micError && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-600 dark:text-red-300 text-xs sm:text-sm font-medium shadow-lg backdrop-blur-xl flex items-center gap-2 animate-fade-in max-w-[90vw]">
+          <MicOff className="w-4 h-4 shrink-0" />
+          <span className="truncate">{micError}</span>
+        </div>
+      )}
+
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-sm md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      <aside
+        className={`
+          fixed inset-y-0 left-0 z-50 w-[300px] sm:w-[320px]
+          md:static md:z-auto md:shrink-0
+          border-r border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 md:bg-white md:dark:bg-slate-900/60
+          backdrop-blur-xl flex flex-col justify-between shadow-2xl md:shadow-none
+          transition-transform duration-250 ease-out
+          md:transition-[width,margin] md:duration-200 md:ease-out md:overflow-hidden
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
+          ${desktopSidebarOpen ? 'md:w-80' : 'md:w-0 md:border-r-0'}
+        `}
+      >
+        <div className={`flex flex-col justify-between h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
+          <div className="space-y-5 overflow-y-auto flex-1 min-w-[260px]">
+            <div className="flex items-center justify-center gap-3 pt-1">
+              <DocAgentMark className="w-9 h-9 shrink-0" />
+              <h1 className="font-bold text-slate-900 dark:text-slate-100 text-base tracking-tight">
+                DocAgent RAG
+              </h1>
             </div>
 
-            {/* Icons Bar: Dark Mode & Sidebar Toggle */}
-            <div className="flex items-center space-x-4 px-2 text-gray-400">
+            <div className="flex items-center justify-center gap-1 pb-1">
               <button
-                onClick={() => setIsDarkMode(!isDarkMode)}
-                className="hover:text-gray-600 transition"
-                title="Toggle Theme"
+                type="button"
+                onClick={toggleTheme}
+                className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+                aria-label="Toggle theme"
+                title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               >
-                {isDarkMode ? '☀️' : '🌙'}
+                {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
               </button>
+
               <button
-                onClick={() => setIsSidebarOpen(false)}
-                className="hover:text-gray-600 transition"
-                title="Collapse Sidebar"
+                type="button"
+                onClick={() => setDesktopSidebarOpen(false)}
+                className="hidden md:inline-flex p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+                aria-label="Collapse sidebar"
+                title="Collapse sidebar"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
-                </svg>
+                <PanelLeftClose className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(false)}
+                className="md:hidden p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer"
+                aria-label="Close sidebar"
+              >
+                <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* New Chat Button */}
+            <div className="border-t border-slate-200 dark:border-slate-800/80" />
+
             <button
-              onClick={handleNewChat}
-              className={`w-full py-2.5 px-4 rounded-xl text-sm font-medium flex items-center justify-center space-x-2 border transition shadow-sm ${
-                isDarkMode 
-                  ? 'bg-indigo-950/40 text-indigo-300 border-indigo-800/60 hover:bg-indigo-900/60' 
-                  : 'bg-[#f5f3ff] text-[#6366f1] border-indigo-100 hover:bg-indigo-100/70'
-              }`}
+              type="button"
+              onClick={() => {
+                handleNewChat();
+                setSidebarOpen(false);
+              }}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700/70 hover:border-indigo-500/50 bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/40 dark:hover:bg-slate-800/70 text-sm font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100 transition duration-200 cursor-pointer"
             >
-              <span>+</span>
-              <span>New Chat</span>
+              <MessageSquarePlus className="w-4 h-4 text-indigo-600 dark:text-indigo-400" /> New Chat
             </button>
 
-            {/* Chat History */}
-            <div>
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider px-1 mb-2">
-                CHAT HISTORY
-              </p>
-              <div className={`py-2 px-3 rounded-lg text-xs font-medium truncate ${
-                isDarkMode ? 'bg-indigo-900/40 text-indigo-200' : 'bg-[#eef2ff] text-[#4f46e5]'
-              }`}>
-                {messages.length > 0 ? messages[0].text : 'New Chat'}
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Chat History
+              </label>
+              <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+                {conversations.map((c) => (
+                  <div key={c.id} className="relative group">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleSwitchConversation(c.id);
+                        setSidebarOpen(false);
+                      }}
+                      className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
+                        c.id === activeConversationId
+                          ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
+                          : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
+                      }`}
+                      title={c.title}
+                    >
+                      {c.title}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setOpenMenuId((prev) => (prev === c.id ? null : c.id));
+                      }}
+                      className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
+                        openMenuId === c.id ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+                      }`}
+                      aria-label={`More options for ${c.title}`}
+                      aria-haspopup="menu"
+                      aria-expanded={openMenuId === c.id}
+                    >
+                      <MoreHorizontal className="w-3.5 h-3.5" />
+                    </button>
+
+                    {openMenuId === c.id && (
+                      <div
+                        ref={chatMenuRef}
+                        role="menu"
+                        className="absolute right-0 top-[calc(100%+2px)] z-20 w-36 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-lg py-1 animate-fade-in"
+                      >
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteConversation(c.id);
+                          }}
+                          className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           </div>
 
-          {/* Sidebar Footer Status */}
-          <div className="border-t border-gray-100 dark:border-gray-800 pt-3 text-[11px] text-gray-400 flex items-center justify-between">
+          <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px]">
             <span>Backend Pipeline:</span>
-            <span className="flex items-center space-x-1.5 text-emerald-500 font-medium">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span>FastAPI Active</span>
-            </span>
+            {backendOnline === null ? (
+              <span className="inline-flex items-center gap-1.5 text-slate-500 dark:text-slate-400 font-medium">
+                <Loader2 className="w-3 h-3 animate-spin" /> Checking...
+              </span>
+            ) : backendOnline ? (
+              <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400 font-medium">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse" />
+                FastAPI Active
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 text-red-600 dark:text-red-400 font-medium">
+                <span className="w-2 h-2 rounded-full bg-red-500 dark:bg-red-400" />
+                Offline
+              </span>
+            )}
+          </div>
+        </div>
+      </aside>
+
+      {!desktopSidebarOpen && (
+        <button
+          type="button"
+          onClick={() => setDesktopSidebarOpen(true)}
+          className="hidden md:inline-flex fixed top-5 left-5 z-40 p-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 shadow-sm transition cursor-pointer"
+          aria-label="Expand sidebar"
+          title="Expand sidebar"
+        >
+          <PanelLeftOpen className="w-4 h-4" />
+        </button>
+      )}
+
+      <main
+        className="flex-1 flex flex-col justify-between bg-slate-50 dark:bg-slate-950 overflow-hidden relative min-w-0"
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {dragOver && (
+          <div className="absolute inset-0 z-30 flex items-center justify-center bg-indigo-50/90 dark:bg-indigo-950/80 border-4 border-dashed border-indigo-500 rounded-none pointer-events-none">
+            <div className="flex flex-col items-center gap-2 text-indigo-700 dark:text-indigo-300">
+              <FileUp className="w-10 h-10" />
+              <span className="font-medium text-sm">Drop PDF(s) to ingest</span>
+            </div>
+          </div>
+        )}
+
+        <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition cursor-pointer"
+            aria-label="Open sidebar"
+          >
+            <Menu className="w-5 h-5" />
+          </button>
+          <div className="flex items-center gap-2">
+            <DocAgentMark className="w-7 h-7 shrink-0" />
+            <span className="font-semibold text-sm text-slate-900 dark:text-slate-200">DocAgent</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={handleNewChat}
+              className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 transition cursor-pointer"
+              aria-label="New chat"
+            >
+              <MessageSquarePlus className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+
+        <div className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}>
+          {isEmptyChat && !loading && (
+            <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-12">
+              <DocAgentMark className="w-14 h-14 sm:w-16 sm:h-16 mb-6" />
+              <h2 className="text-2xl sm:text-3xl font-semibold text-slate-900 dark:text-slate-100 mb-3 tracking-tight">
+                {greeting}
+              </h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
+                {greetingSubtext}
+              </p>
+              <div className="w-full max-w-2xl px-4">
+                <ChatComposer
+                  query={query}
+                  setQuery={setQuery}
+                  onSubmit={handleSendQuery}
+                  loading={loading}
+                  onTriggerUpload={handleTriggerUpload}
+                  onMicClick={handleMicClick}
+                  listening={listening}
+                  pendingAttachments={pendingAttachments}
+                  setPendingAttachments={setPendingAttachments}
+                  ingestedFiles={ingestedFiles}
+                  handleRetryIngest={handleRetryIngest}
+                  floating
+                />
+                <p className="text-center text-[11px] text-slate-400 dark:text-slate-600 mt-3">
+                  Made by HS
+                </p>
+              </div>
+            </div>
+          )}
+
+          {!isEmptyChat && (
+            <>
+              {messages.map((msg, index) => {
+                const isUser = msg.sender === 'user';
+                const isEditing = editingIndex === index;
+                const dedupedSources = getDeduplicatedSources(msg.sources);
+
+                return (
+                  <div
+                    key={index}
+                    className={`group flex items-start ${isUser ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div className={`max-w-[85%] sm:max-w-3xl flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+                      {isUser && isEditing ? (
+                        <div className="w-full min-w-0 bg-indigo-600 rounded-2xl rounded-tr-none p-3.5 sm:p-4 shadow-sm space-y-2.5">
+                          <textarea
+                            value={editText}
+                            onChange={(e) => setEditText(e.target.value)}
+                            className="w-full bg-white/10 border border-white/20 rounded-lg p-2.5 text-sm text-white placeholder-white/50 focus:outline-none focus:border-white/40 resize-y min-h-[60px]"
+                            autoFocus
+                          />
+                          <div className="flex justify-end gap-2 text-xs">
+                            <button
+                              type="button"
+                              onClick={handleCancelEdit}
+                              className="px-3 py-1.5 rounded-lg text-white/80 hover:text-white hover:bg-white/10 transition cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEdit(index)}
+                              className="px-3.5 py-1.5 rounded-lg bg-white text-indigo-600 font-medium hover:bg-white/90 transition cursor-pointer"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div
+                          className={`relative rounded-2xl p-3.5 sm:p-4 text-sm leading-relaxed shadow-sm ${
+                            isUser
+                              ? 'bg-indigo-600 text-white rounded-tr-none shadow-indigo-600/10'
+                              : 'bg-white dark:bg-slate-900/90 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 rounded-tl-none backdrop-blur-sm'
+                          }`}
+                        >
+                          {isUser ? (
+                            <>
+                              {msg.attachedFiles && msg.attachedFiles.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 mb-2">
+                                  {msg.attachedFiles.map((fname, fIndex) => (
+                                    <button
+                                      key={fIndex}
+                                      type="button"
+                                      onClick={() => openFileViewer(fname)}
+                                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/15 border border-white/20 text-[11px] sm:text-xs font-medium text-white hover:bg-white/25 transition cursor-pointer"
+                                      title={`Open ${fname}`}
+                                    >
+                                      <FileText className="w-3.5 h-3.5 shrink-0" />
+                                      <span className="truncate max-w-[160px] sm:max-w-[220px]">{fname}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                            </>
+                          ) : (
+                            <div className="markdown-body break-words text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+                              <ReactMarkdown
+                                components={{
+                                  h1: (props) => <h3 className="text-base font-bold mt-3 mb-1.5" {...props} />,
+                                  h2: (props) => <h3 className="text-base font-bold mt-3 mb-1.5" {...props} />,
+                                  h3: (props) => <h4 className="text-sm font-bold mt-3 mb-1.5" {...props} />,
+                                  p: (props) => <p className="mb-2 whitespace-pre-wrap" {...props} />,
+                                  ul: (props) => <ul className="list-disc pl-5 mb-2 space-y-0.5" {...props} />,
+                                  ol: (props) => <ol className="list-decimal pl-5 mb-2 space-y-0.5" {...props} />,
+                                  li: (props) => <li className="pl-0.5" {...props} />,
+                                  strong: (props) => <strong className="font-semibold" {...props} />,
+                                  code: (props) => (
+                                    <code
+                                      className="bg-slate-100 dark:bg-slate-800 rounded px-1 py-0.5 text-xs font-mono"
+                                      {...props}
+                                    />
+                                  ),
+                                  hr: () => <hr className="my-3 border-slate-200 dark:border-slate-700" />,
+                                  a: (props) => (
+                                    <a
+                                      className="text-indigo-600 dark:text-indigo-400 underline"
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      {...props}
+                                    />
+                                  ),
+                                }}
+                              >
+                                {msg.text}
+                              </ReactMarkdown>
+                            </div>
+                          )}
+
+                          {!isUser && dedupedSources.length > 0 && (
+                            <div className="mt-3.5 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-xs">
+                              <div className="font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
+                                <span>Retrieved Sources:</span>
+                                <span className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
+                                  ({dedupedSources.length} distinct{' '}
+                                  {dedupedSources.length === 1 ? 'citation' : 'citations'})
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap gap-1.5">
+                                {dedupedSources.map((src, srcIndex) => {
+                                  const isVisual = src.chunk_type === 'visual';
+                                  const pageText = src.page ? `Page ${src.page}` : '';
+                                  const sourceName = src.source || 'Document';
+                                  const canOpen = ingestedFiles.some((f) => f.name === sourceName && f.file);
+
+                                  return (
+                                    <button
+                                      key={srcIndex}
+                                      type="button"
+                                      onClick={() => canOpen && openFileViewer(sourceName, src.page)}
+                                      disabled={!canOpen}
+                                      className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs font-mono transition shadow-sm ${
+                                        !canOpen ? 'cursor-default opacity-90' : 'cursor-pointer hover:shadow-md hover:-translate-y-px'
+                                      } ${
+                                        isVisual
+                                          ? 'bg-violet-50 dark:bg-violet-950/40 border-violet-200 dark:border-violet-500/40 text-violet-700 dark:text-violet-300'
+                                          : 'bg-slate-100 dark:bg-slate-800/80 border-slate-200 dark:border-slate-700/80 text-indigo-700 dark:text-indigo-300'
+                                      }`}
+                                      title={canOpen ? `Open ${sourceName} at ${pageText || 'page 1'}` : sourceName}
+                                    >
+                                      {isVisual ? (
+                                        <ImageIcon className="w-3 h-3 text-violet-600 dark:text-violet-400 shrink-0" />
+                                      ) : (
+                                        <FileText className="w-3 h-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                                      )}
+                                      <span className="truncate max-w-[120px] sm:max-w-[180px]">
+                                        {sourceName}
+                                      </span>
+                                      {pageText && <span className="opacity-75">({pageText})</span>}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {isUser && !isEditing && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartEdit(index, msg.text)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1 text-xs text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 flex items-center gap-1 px-1 py-0.5 cursor-pointer"
+                          title="Edit this query and regenerate response"
+                        >
+                          <Edit3 className="w-3 h-3" /> Edit
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {loading && (
+                <div className="flex items-center text-slate-500 dark:text-slate-400 text-sm">
+                  <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl rounded-tl-none flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 shadow-sm">
+                    <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
+                    <span className="hidden sm:inline">
+                      Retrieving document chunks & generating answer with Gemini...
+                    </span>
+                    <span className="sm:hidden">Generating answer...</span>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </>
+          )}
+        </div>
+
+        {!isEmptyChat && (
+          <div className="px-3 sm:px-4 lg:px-6 pb-3 sm:pb-4 lg:pb-5 pt-2 shrink-0">
+            <div className="max-w-4xl mx-auto">
+              <ChatComposer
+                query={query}
+                setQuery={setQuery}
+                onSubmit={handleSendQuery}
+                loading={loading}
+                onTriggerUpload={handleTriggerUpload}
+                onMicClick={handleMicClick}
+                listening={listening}
+                pendingAttachments={pendingAttachments}
+                setPendingAttachments={setPendingAttachments}
+                ingestedFiles={ingestedFiles}
+                handleRetryIngest={handleRetryIngest}
+              />
+            </div>
+            <p className="text-center text-[11px] text-slate-400 dark:text-slate-600 mt-2.5">
+              Made by HS
+            </p>
+          </div>
+        )}
+      </main>
+
+      {viewerFile && (
+        <aside
+          className="hidden md:flex flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
+          style={{ width: viewerWidth }}
+        >
+          <div
+            onMouseDown={startViewerResize}
+            className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize file viewer"
+          >
+            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+          </div>
+          <div className="flex items-center justify-between gap-3 px-4 py-3.5 border-b border-slate-200 dark:border-slate-800/80 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+              <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate" title={viewerFile}>
+                {viewerFile}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={closeFileViewer}
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition shrink-0 cursor-pointer"
+              aria-label="Close file viewer"
+              title="Close"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {viewerPage && (
+            <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+              <Search className="w-3.5 h-3.5 shrink-0" />
+              <span>Cited from page {viewerPage} — jumped there below.</span>
+            </div>
+          )}
+
+          <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
+            {viewerUrl ? (
+              <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
+            ) : (
+              <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
+                Couldn&apos;t load this file for preview.
+              </div>
+            )}
           </div>
         </aside>
       )}
 
-      {/* Main Area */}
-      <main className="flex-1 flex flex-col relative overflow-hidden">
-        {/* Toggle Sidebar Button if collapsed */}
-        {!isSidebarOpen && (
-          <button
-            onClick={() => setIsSidebarOpen(true)}
-            className="absolute top-4 left-4 z-10 p-2 bg-white dark:bg-slate-800 rounded-lg shadow-md border border-gray-200 dark:border-gray-700 text-gray-500 hover:text-gray-700"
-            title="Expand Sidebar"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-            </svg>
-          </button>
-        )}
+      {viewerFile && (
+        <div className="md:hidden fixed inset-0 z-[70] flex flex-col justify-end">
+          <style>{`
+            @keyframes slide-up {
+              from { transform: translateY(100%); }
+              to { transform: translateY(0); }
+            }
+          `}</style>
+          <div
+            className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm animate-fade-in"
+            onClick={closeFileViewer}
+          />
+          <div className="relative flex flex-col bg-white dark:bg-slate-950 rounded-t-2xl shadow-2xl h-[92vh] overflow-hidden animate-[slide-up_0.25s_ease-out]">
+            <div className="flex justify-center pt-2.5 pb-1 shrink-0">
+              <div className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />
+            </div>
 
-        {/* Chat Messages / Center Empty State */}
-        <div className="flex-1 overflow-y-auto p-6 flex flex-col">
-          {messages.length === 0 ? (
-            <div className="m-auto flex flex-col items-center justify-center text-center max-w-lg space-y-4">
-              <div className="w-16 h-16 bg-[#6366f1] rounded-2xl flex items-center justify-center text-white shadow-xl shadow-indigo-200/50">
-                <svg className="w-9 h-9 fill-current" viewBox="0 0 24 24">
-                  <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
-                </svg>
+            <div className="flex items-center justify-between gap-3 px-4 pb-3 pt-1 border-b border-slate-200 dark:border-slate-800/80 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span className="text-sm font-medium text-slate-800 dark:text-slate-200 truncate" title={viewerFile}>
+                  {viewerFile}
+                </span>
               </div>
-
-              <h1 className={`text-2xl font-bold tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
-                {greeting}
-              </h1>
-
-              <p className="text-xs text-gray-400 font-normal">
-                Upload a PDF or ask about one already shared — I'm here.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-6 max-w-3xl w-full mx-auto">
-              {messages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex ${
-                    msg.sender === 'user' ? 'justify-end' : 'justify-start'
-                  }`}
-                >
-                  <div
-                    className={`max-w-xl rounded-2xl px-5 py-4 text-sm leading-relaxed shadow-sm ${
-                      msg.sender === 'user'
-                        ? 'bg-[#6366f1] text-white rounded-tr-none'
-                        : isDarkMode
-                        ? 'bg-[#1e293b] text-gray-200 border border-gray-700 rounded-tl-none'
-                        : 'bg-white text-gray-800 border border-gray-100 rounded-tl-none'
-                    }`}
-                  >
-                    {msg.files && msg.files.length > 0 && (
-                      <div className="flex flex-wrap gap-2 mb-2">
-                        {msg.files.map((fname, idx) => (
-                          <div
-                            key={idx}
-                            className="bg-indigo-500/30 text-white text-xs px-2.5 py-1 rounded-lg flex items-center space-x-1.5"
-                          >
-                            <span>📄</span>
-                            <span className="font-medium">{fname}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    <p className="whitespace-pre-wrap">{msg.text}</p>
-                  </div>
-                </div>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
-
-        {/* Input Dock Area */}
-        <footer className="p-6 flex flex-col items-center">
-          {/* File Badges above Input Pill */}
-          {attachedFiles.length > 0 && (
-            <div className="flex flex-wrap justify-center gap-2 mb-3">
-              {attachedFiles.map((file) => (
-                <div
-                  key={file.id}
-                  className={`border shadow-sm rounded-xl px-3 py-1.5 flex items-center space-x-2 text-xs ${
-                    isDarkMode ? 'bg-[#1e293b] border-gray-700 text-gray-200' : 'bg-white border-gray-200 text-gray-700'
-                  }`}
-                >
-                  {file.isUploading ? (
-                    <div className="w-3.5 h-3.5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin" />
-                  ) : (
-                    <span className="text-indigo-500">📄</span>
-                  )}
-                  <span className="font-medium truncate max-w-[120px]">
-                    {file.name}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeFile(file.id)}
-                    className="text-gray-400 hover:text-red-500 font-bold ml-1"
-                    title="Remove file"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Bottom Bar Controls */}
-          <div className="w-full max-w-2xl flex items-center space-x-3">
-            {/* File Add (+) Button */}
-            <input
-              type="file"
-              ref={fileInputRef}
-              onChange={handleFileSelect}
-              accept=".pdf,.png,.jpg,.jpeg,.txt,.md"
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className={`w-11 h-11 rounded-2xl flex items-center justify-center border shadow-sm transition text-gray-500 hover:text-indigo-600 ${
-                isDarkMode ? 'bg-[#1e293b] border-gray-700 hover:bg-gray-800' : 'bg-white border-gray-200/80 hover:bg-gray-50'
-              }`}
-              title="Add File"
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-              </svg>
-            </button>
-
-            {/* Input Pill */}
-            <form
-              onSubmit={handleSendQuery}
-              className={`flex-1 rounded-2xl border px-4 py-2.5 flex items-center shadow-sm transition ${
-                isDarkMode
-                  ? 'bg-[#1e293b] border-gray-700 focus-within:border-indigo-500'
-                  : 'bg-white border-gray-200/80 focus-within:border-indigo-400'
-              }`}
-            >
-              <input
-                type="text"
-                value={inputQuery}
-                onChange={(e) => setInputQuery(e.target.value)}
-                placeholder="Ask about text, tables, or diagrams..."
-                className="flex-1 bg-transparent text-sm focus:outline-none placeholder-gray-400"
-              />
-
-              {/* Mic Icon */}
               <button
                 type="button"
-                className="text-gray-400 hover:text-gray-600 px-1"
-                title="Voice Input"
+                onClick={closeFileViewer}
+                className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition shrink-0 cursor-pointer"
+                aria-label="Close file viewer"
               >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                </svg>
+                <X className="w-4 h-4" />
               </button>
-            </form>
+            </div>
 
-            {/* Send Paperplane Button */}
-            <button
-              type="button"
-              onClick={handleSendQuery}
-              disabled={!inputQuery.trim() || isQuerying || hasUploadingFile}
-              className={`w-11 h-11 rounded-2xl flex items-center justify-center transition shadow-md ${
-                !inputQuery.trim() || isQuerying || hasUploadingFile
-                  ? 'bg-indigo-100 text-indigo-300 dark:bg-slate-800 dark:text-gray-600 cursor-not-allowed'
-                  : 'bg-[#818cf8] hover:bg-[#6366f1] text-white'
-              }`}
-            >
-              <svg className="w-5 h-5 transform rotate-90" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
-              </svg>
-            </button>
+            {viewerPage && (
+              <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
+                <Search className="w-3.5 h-3.5 shrink-0" />
+                <span>Cited from page {viewerPage} — jumped there below.</span>
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-900">
+              {viewerUrl ? (
+                <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
+              ) : (
+                <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
+                  Couldn&apos;t load this file for preview.
+                </div>
+              )}
+            </div>
           </div>
-
-          <span className="text-[10px] text-gray-400 mt-3 font-normal">
-            Made by HS
-          </span>
-        </footer>
-      </main>
-
-      {/* PDF Viewer Panel (Right Side) */}
-      {activePdfUrl && (
-        <section className={`w-[450px] border-l flex flex-col h-full shrink-0 ${isDarkMode ? 'bg-[#1e293b] border-gray-700' : 'bg-white border-gray-200'}`}>
-          <div className="p-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between text-xs font-semibold text-gray-500">
-            <span>Document Preview</span>
-            <button
-              onClick={() => setActivePdfUrl(null)}
-              className="text-gray-400 hover:text-gray-600 text-sm p-1"
-            >
-              ✕
-            </button>
-          </div>
-          <iframe
-            src={activePdfUrl}
-            className="w-full flex-1 border-0"
-            title="PDF Preview"
-          />
-        </section>
+        </div>
       )}
     </div>
   );
