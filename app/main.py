@@ -18,9 +18,10 @@ from starlette.concurrency import run_in_threadpool
 from dotenv import load_dotenv
 
 # LangChain & Google GenAI Imports
-from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
+
+from .document_loaders import load_document, SUPPORTED_EXTENSIONS
+from gemini_client import GeminiClient, GeminiExhaustedError
 
 # `langchain_community.vectorstores.Chroma` is the deprecated shim; the
 # maintained integration lives in the `langchain-chroma` package (already in
@@ -32,15 +33,25 @@ load_dotenv()
 logger = logging.getLogger("docagent")
 
 # ── API Key Verification ──
-# GEMINI_API_KEY (or GOOGLE_API_KEY) is used only for answer generation now —
-# one call per question, not per chunk, so it's far less exposed to quota
-# limits than embedding calls were.
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+# GEMINI_API_KEY(S) is used only for answer generation now — one call per
+# question, not per chunk, so it's far less exposed to quota limits than
+# embedding calls were.
+#
+# Supports multiple keys and models for rotation/fallback — see
+# gemini_client.py for the full reasoning. Kept here only as a startup
+# validation step: fail fast and loud if nothing usable is configured,
+# rather than letting every /query request 500 until someone notices.
+# GEMINI_API_KEYS (comma-separated) is preferred; GEMINI_API_KEY /
+# GOOGLE_API_KEY (singular) still work for backward compatibility.
+_GEMINI_KEY_COUNT = len(
+    [k.strip() for k in (os.getenv("GEMINI_API_KEYS") or "").split(",") if k.strip()]
+) or (1 if (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")) else 0)
 
-if not GEMINI_API_KEY:
+if _GEMINI_KEY_COUNT == 0:
     raise RuntimeError(
         "No Gemini API key found. Copy .env.example to .env and set "
-        "GOOGLE_API_KEY (or GEMINI_API_KEY) to a key from "
+        "GEMINI_API_KEYS (comma-separated, for key rotation) or "
+        "GOOGLE_API_KEY / GEMINI_API_KEY (single key) to a key from "
         "https://aistudio.google.com/."
     )
 
@@ -87,15 +98,21 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "jina-embeddings-v3")
 JINA_EMBED_URL = "https://api.jina.ai/v1/embeddings"
 
 # The LLM call in /query is one request per question, not one per chunk, so
-# it's far less likely to hit the same quota wall embeddings did.
+# it's far less likely to hit the same quota wall embeddings did — and with
+# GeminiClient now retrying/rotating on top of that, a single 429 no longer
+# fails the request outright either.
+#
 # `gemini-1.5-flash` was retired first, then `gemini-2.5-flash` was ALSO
 # retired for new-user access shortly after ("no longer available to new
 # users" — see the 404 this threw). Gemini's model lineup moves fast enough
-# that any hardcoded name here has a real chance of going stale again;
-# `gemini-3.6-flash` is Google's own suggested replacement in that error and
-# is confirmed present in this account's `ListModels` output. If this 404s
-# again later, re-run `GET /v1beta/models?key=...` and swap in whatever's
-# current — the error message itself usually names the successor.
+# that any hardcoded name has a real chance of going stale again — that's
+# why LLM_MODEL is no longer a single name but an ordered fallback list
+# (LLM_MODELS, comma-separated; LLM_MODEL singular still works and is tried
+# first). `gemini-3.6-flash` is Google's own suggested replacement from that
+# error and is confirmed present in this account's `ListModels` output;
+# `gemini-2.5-flash` stays as the built-in fallback in gemini_client.py's
+# default list. If both 404 later, re-run
+# `GET /v1beta/models?key=...` and set LLM_MODELS to whatever's current.
 LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.6-flash")
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "50")) * 1024 * 1024
@@ -197,34 +214,7 @@ vectorstore = Chroma(
     embedding_function=embeddings,
 )
 
-# ── Reset vector store on every startup ──
-# Chroma persists to disk across restarts, but the frontend's chat history
-# and this file's own `ingestion_jobs` tracker are in-memory and reset on
-# every launch. That mismatch made documents "silently" accumulate across
-# dev restarts — re-uploading the same PDF during testing just kept adding
-# duplicate embeddings on top of old ones, growing the collection forever.
-# Wiping the collection here means every server start begins from a clean,
-# empty index, matching the fresh chat history the frontend already shows.
-# Set CLEAR_CHROMA_ON_STARTUP=false in .env to opt out (e.g. in production,
-# where documents should persist across deploys/restarts).
-if os.getenv("CLEAR_CHROMA_ON_STARTUP", "true").strip().lower() not in ("false", "0", "no"):
-    try:
-        vectorstore.delete_collection()
-    except Exception:
-        # Nothing to delete yet (first-ever run) — safe to ignore.
-        pass
-    vectorstore = Chroma(
-        collection_name=COLLECTION_NAME,
-        persist_directory=str(PERSIST_DIR),
-        embedding_function=embeddings,
-    )
-    logger.info("Cleared Chroma collection %r on startup.", COLLECTION_NAME)
-
-llm = ChatGoogleGenerativeAI(
-    model=LLM_MODEL,
-    google_api_key=GEMINI_API_KEY,
-    temperature=0.2,
-)
+llm = GeminiClient(temperature=0.2)
 
 
 # ── Job status tracking ──
@@ -320,22 +310,6 @@ class QueryResponse(BaseModel):
     query: str
     answer: str
     sources: List[SourceMetadata]
-
-
-class TitleRequest(BaseModel):
-    """A single user message to summarize into a short chat title."""
-
-    message: str = ""
-
-    @model_validator(mode="after")
-    def _require_non_empty(self) -> "TitleRequest":
-        if not self.message.strip():
-            raise ValueError("Provide a non-empty 'message'.")
-        return self
-
-
-class TitleResponse(BaseModel):
-    title: str
 
 
 # ── Helpers ──
@@ -450,9 +424,13 @@ def _clean_metadata(meta: dict, filename: str) -> dict:
     page = meta.get("page")
     cleaned = {
         "source": filename,
-        # PyMuPDFLoader pages are 0-based; citations should read 1-based.
+        # Loaders emit 0-based page/slide indices; citations should read 1-based.
         "page": (page + 1) if isinstance(page, int) else 1,
-        "chunk_type": "text",
+        # Preserve the loader's chunk_type (e.g. "ocr" vs "text") instead of
+        # collapsing everything to "text" — this is what lets a citation
+        # flag "this came from OCR, double-check against the original"
+        # rather than presenting OCR'd and true-text content identically.
+        "chunk_type": meta.get("chunk_type") if meta.get("chunk_type") in ("text", "ocr") else "text",
     }
     return {k: cleaned[k] for k in _KEEP_METADATA}
 
@@ -471,17 +449,21 @@ def _drop_existing_chunks(filename: str) -> None:
 
 
 # ── Background Worker ──
-def process_pdf_in_background(file_path: str, filename: str):
+def process_document_in_background(file_path: str, filename: str):
     try:
         ingestion_jobs[filename] = {"status": "processing", "filename": filename}
 
-        # 1. Load document (PyMuPDF is a C++-backed parser, significantly
-        #    faster than pypdf for large textbook-sized PDFs)
-        loader = PyMuPDFLoader(file_path)
-        docs = loader.load()
+        # 1. Load document — dispatches on extension (PDF/DOCX/PPTX/JPG/PNG)
+        #    and, for PDF/image formats, falls back to Gemini OCR per-page
+        #    when no embedded text layer is found. See document_loaders.py.
+        docs = load_document(file_path, filename)
 
         if not docs:
-            raise ValueError("No pages could be read from this PDF.")
+            raise ValueError(
+                "No extractable text found in this document. If it's a "
+                "scanned or handwritten file, OCR may have failed to read "
+                "it — try a clearer scan."
+            )
 
         # 2. Chunk text efficiently (larger chunks = fewer embedding API calls)
         text_splitter = RecursiveCharacterTextSplitter(
@@ -494,13 +476,11 @@ def process_pdf_in_background(file_path: str, filename: str):
         for chunk in chunks:
             chunk.metadata = _clean_metadata(chunk.metadata, filename)
 
-        # A scanned/image-only PDF splits into zero usable chunks. Reporting
-        # "completed" for that was misleading — queries would find nothing.
+        # Whitespace-only or otherwise unusable extraction after chunking —
+        # rare (load_document already screens out fully-empty documents
+        # above), but report it plainly rather than claiming success.
         if not chunks:
-            raise ValueError(
-                "No extractable text found. This PDF may be a scanned image; "
-                "OCR is required."
-            )
+            raise ValueError("Extracted content had no usable text after processing.")
 
         _drop_existing_chunks(filename)
 
@@ -590,7 +570,32 @@ def health_check():
         "message": "FastAPI RAG Pipeline Active",
         "collection": COLLECTION_NAME,
         "persist_dir": str(PERSIST_DIR),
+        "gemini_keys_configured": len(llm.api_keys),
+        "gemini_models": llm.models,
     }
+
+
+# ── File-type magic numbers ──
+# The extension is client-supplied and trivially spoofable, so it was only
+# ever a routing hint, not a security boundary — validate the actual bytes
+# per format before handing the file to a parser. DOCX and PPTX are both
+# ZIP containers (Office Open XML), so they share the same "PK" signature;
+# distinguishing them further would mean opening the zip, which isn't
+# worth it here since a wrong-but-ZIP file just fails cleanly in
+# python-docx/python-pptx instead of anywhere more dangerous.
+_MAGIC_NUMBERS = {
+    ".pdf": (b"%PDF-",),
+    ".docx": (b"PK\x03\x04",),
+    ".pptx": (b"PK\x03\x04",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+}
+
+
+def _validate_magic_number(ext: str, first_bytes: bytes) -> bool:
+    signatures = _MAGIC_NUMBERS.get(ext, ())
+    return any(first_bytes.startswith(sig) for sig in signatures)
 
 
 @app.post("/ingest")
@@ -600,15 +605,22 @@ async def ingest_document(
     file: UploadFile = File(...),
 ):
     filename = sanitize_filename(file.filename)
+    ext = Path(filename).suffix.lower()
 
-    # `.endswith(".pdf")` is case-sensitive, so a perfectly valid `REPORT.PDF`
-    # was rejected while the frontend happily accepted it.
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Unsupported file type. Supported: "
+                f"{', '.join(sorted(SUPPORTED_EXTENSIONS))}."
+            ),
+        )
 
     # Never build the temp path from client input. mkstemp also avoids the
     # collision where two users uploading "notes.pdf" overwrite each other.
-    fd, temp_path = tempfile.mkstemp(prefix="docagent_", suffix=".pdf")
+    # Suffix matches the real extension so downstream libraries that sniff
+    # by file extension (python-docx, python-pptx) behave correctly.
+    fd, temp_path = tempfile.mkstemp(prefix="docagent_", suffix=ext)
     os.close(fd)
 
     written = 0
@@ -620,7 +632,7 @@ async def ingest_document(
             # health check and every other request froze behind a large PDF.
             while chunk := await file.read(1024 * 1024):
                 if not first_bytes:
-                    first_bytes = chunk[:5]
+                    first_bytes = chunk[:16]
                 written += len(chunk)
                 if written > MAX_UPLOAD_BYTES:
                     raise HTTPException(
@@ -637,11 +649,11 @@ async def ingest_document(
 
         # The extension was the only gate, so a renamed .exe or zip bomb was
         # accepted and only failed deep inside the background task. Check the
-        # actual PDF magic number instead of trusting the name.
-        if not first_bytes.startswith(b"%PDF-"):
+        # actual file signature instead of trusting the name.
+        if not _validate_magic_number(ext, first_bytes):
             raise HTTPException(
                 status_code=400,
-                detail="File is not a valid PDF (missing %PDF- header).",
+                detail=f"File does not look like a valid {ext.lstrip('.').upper()} file.",
             )
     except Exception:
         try:
@@ -651,7 +663,7 @@ async def ingest_document(
         raise
 
     ingestion_jobs[filename] = {"status": "processing", "filename": filename}
-    background_tasks.add_task(process_pdf_in_background, temp_path, filename)
+    background_tasks.add_task(process_document_in_background, temp_path, filename)
 
     return {"filename": filename, "status": "processing", "message": "Ingestion initiated."}
 
@@ -677,51 +689,6 @@ def check_status(filename: str):
     if _already_indexed(filename):
         return {"status": "completed", "filename": filename}
     return {"status": "not_found", "filename": filename}
-
-
-@app.post("/title", response_model=TitleResponse)
-def generate_title(payload: TitleRequest):
-    """Summarize a user's first message into a short chat-history title.
-
-    Deliberately separate from /query: this needs no document retrieval, so
-    it skips the vector store and Jina embeddings entirely and only spends
-    one small Gemini call (same GEMINI_API_KEY /query already uses) — the
-    RAG pipeline's LLM, reused for a much cheaper job than answering a
-    question over document context.
-    """
-    message = payload.message.strip()
-
-    prompt = f"""Summarize the following chat message into a short title for a
-chat history list, similar to how ChatGPT or Claude name conversations.
-
-Rules:
-- 2 to 6 words.
-- No quotation marks, no trailing punctuation.
-- Plain title case, no markdown.
-- Capture the topic, not the literal phrasing of a question.
-
-Message:
-{message}
-
-Title:"""
-
-    try:
-        response = llm.invoke(prompt)
-        title = _coerce_answer(response).strip().strip('"').strip("'")
-        # Guard against the model ignoring the length instruction — a title
-        # this UI truncates anyway shouldn't be allowed to explode into a
-        # full sentence in the sidebar.
-        if len(title) > 60:
-            title = title[:60].rstrip() + "…"
-        if not title:
-            raise ValueError("empty title")
-        return TitleResponse(title=title)
-    except Exception:
-        # Titling is a nicety, not core functionality — never let it 500 and
-        # break sending a message. Frontend falls back to truncating the
-        # message itself if this endpoint fails for any reason.
-        logger.exception("Title generation failed; frontend will fall back to truncation.")
-        raise HTTPException(status_code=503, detail="Title generation unavailable.")
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -790,36 +757,40 @@ Answer:"""
 
     except HTTPException:
         raise
-    except Exception as e:
-        # Log the full exception server-side; return a short, non-leaky detail.
-        # The old handler echoed raw Google API text straight to the browser.
-        logger.exception("Query failed")
-        message = str(e).lower()
-        if "quota" in message or "rate limit" in message or "429" in message:
+    except GeminiExhaustedError as e:
+        # Every configured (model, key) combination failed — GeminiClient
+        # already classified why on the way here, so map that directly to
+        # a status code instead of re-parsing error text a second time.
+        logger.exception("Query failed: Gemini exhausted (kind=%s)", e.kind)
+        if e.kind == "quota":
             raise HTTPException(
                 status_code=429,
-                detail="Gemini API quota exceeded. Please retry shortly.",
+                detail="Gemini API quota exceeded on all configured keys. Please retry shortly.",
             )
-        if "api key" in message or "unauthenticated" in message or "permission" in message:
+        if e.kind == "auth":
             raise HTTPException(
                 status_code=503,
-                detail="Gemini API rejected the credentials. Check GOOGLE_API_KEY in .env.",
+                detail="Gemini API rejected the credentials. Check GEMINI_API_KEYS/GOOGLE_API_KEY in .env.",
             )
-        if "not_found" in message or "no longer available" in message:
-            # Google periodically retires model names outright (this has
-            # already happened twice for this project — 1.5-flash, then
-            # 2.5-flash). The error text from Google usually names the
-            # replacement, so surface it rather than a bare 500.
+        if e.kind == "model_not_found":
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    f"The configured Gemini model ('{LLM_MODEL}') is no longer "
-                    "available. Google's response: "
-                    f"{str(e)[:300]}. Update LLM_MODEL in .env to a model from "
-                    "GET https://generativelanguage.googleapis.com/v1beta/models"
+                    f"None of the configured Gemini models ({', '.join(llm.models)}) "
+                    "are available. Google's response: "
+                    f"{str(e.last_error)[:300]}. Update LLM_MODELS in .env to a model "
+                    "from GET https://generativelanguage.googleapis.com/v1beta/models"
                     "?key=YOUR_KEY."
                 ),
             )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query failed after exhausting all Gemini keys/models: {str(e.last_error)[:300]}",
+        )
+    except Exception as e:
+        # Anything else (retrieval, prompt construction, etc.) — not a
+        # Gemini-specific failure, so no key/model classification applies.
+        logger.exception("Query failed")
         raise HTTPException(
             status_code=500,
             detail=f"Query failed ({type(e).__name__}). See server logs for details.",
