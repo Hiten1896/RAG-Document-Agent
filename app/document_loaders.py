@@ -2,12 +2,10 @@ import os
 import fitz  # PyMuPDF
 from PIL import Image
 import pytesseract
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Cross-platform Tesseract executable configuration
-# Uses Windows path if running locally on Windows, defaults to system path on Linux/Docker
 if os.name == 'nt':
-    # Default Windows installation path (adjust if your local install path differs)
     default_win_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     if os.path.exists(default_win_path):
         pytesseract.pytesseract.tesseract_cmd = default_win_path
@@ -16,10 +14,7 @@ SUPPORTED_EXTENSIONS = {'.pdf', '.png', '.jpg', '.jpeg', '.txt', '.md'}
 
 
 def load_pdf(file_path: str) -> str:
-    """Extract text from PDF using PyMuPDF.
-
-    If text content is empty or sparse, fall back to OCR on rendered pages.
-    """
+    """Extract text from PDF using PyMuPDF with OCR fallback."""
     text = ""
     doc = fitz.open(file_path)
 
@@ -27,7 +22,6 @@ def load_pdf(file_path: str) -> str:
         page = doc[page_num]
         page_text = page.get_text()
 
-        # Simple OCR fallback if page has minimal native text (e.g. scanned PDF)
         if not page_text.strip():
             pix = page.get_pixmap()
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -51,12 +45,13 @@ def load_text(file_path: str) -> str:
         return f.read()
 
 
-def load_document(file_path: str) -> Dict[str, Any]:
+def load_document(file_path: str, original_filename: Optional[str] = None) -> Dict[str, Any]:
     """Main document loader dispatcher based on file extension."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    ext = os.path.splitext(file_path)[1].lower()
+    filename_for_ext = original_filename if original_filename else file_path
+    ext = os.path.splitext(filename_for_ext)[1].lower()
 
     if ext not in SUPPORTED_EXTENSIONS:
         raise ValueError(
@@ -74,7 +69,7 @@ def load_document(file_path: str) -> Dict[str, Any]:
 
     return {
         "file_path": file_path,
-        "file_name": os.path.basename(file_path),
+        "file_name": original_filename or os.path.basename(file_path),
         "extension": ext,
         "content": content,
     }
