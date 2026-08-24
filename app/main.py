@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from .document_loaders import load_document, SUPPORTED_EXTENSIONS
-from gemini_client import GeminiClient, GeminiExhaustedError
+from .gemini_client import GeminiClient, GeminiExhaustedError
 
 # `langchain_community.vectorstores.Chroma` is the deprecated shim; the
 # maintained integration lives in the `langchain-chroma` package (already in
