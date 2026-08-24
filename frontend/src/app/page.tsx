@@ -1,10 +1,30 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { getSessionId, createNewChatId } from '@/utils/session';
 
-// Set your backend URL (Render endpoint or local backend)
+// Helper functions for Session and Chat management
+function getSessionId(): string {
+  if (typeof window === 'undefined') return 'server_side_session';
+  let sessionId = sessionStorage.getItem('rag_session_id');
+  if (!sessionId) {
+    sessionId = crypto.randomUUID();
+    sessionStorage.setItem('rag_session_id', sessionId);
+  }
+  return sessionId;
+}
+
+function createNewChatId(): string {
+  return crypto.randomUUID();
+}
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+interface UploadedFile {
+  id: string;
+  name: string;
+  extension: string;
+  isUploading: boolean;
+}
 
 interface Message {
   id: string;
@@ -18,74 +38,65 @@ export default function ChatPage() {
   const [chatId, setChatId] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputQuery, setInputQuery] = useState('');
-  const [file, setFile] = useState<File | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
+  const [attachedFiles, setAttachedFiles] = useState<UploadedFile[]>([]);
   const [isQuerying, setIsQuerying] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Initialize Session and Chat IDs on component mount
   useEffect(() => {
-    const sId = getSessionId();
-    const cId = createNewChatId();
-    setSessionId(sId);
-    setChatId(cId);
+    setSessionId(getSessionId());
+    setChatId(createNewChatId());
   }, []);
 
-  // Send beacon signal to wipe vectors in ChromaDB when the user closes the tab
   useEffect(() => {
     if (!sessionId || !chatId) return;
-
     const handleBeforeUnload = () => {
-      const endpoint = `${API_BASE_URL}/api/session/clear`;
-      // Send beacon request carrying headers isn't directly supported by standard beacon,
-      // so we pass headers as query params or basic payload if needed.
       navigator.sendBeacon(
-        `${endpoint}?x_session_id=${sessionId}&x_chat_id=${chatId}`
+        `${API_BASE_URL}/api/session/clear?x_session_id=${sessionId}&x_chat_id=${chatId}`
       );
     };
-
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [sessionId, chatId]);
 
-  // Auto scroll to bottom of chat
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Handler to start a fresh chat session
   const handleNewChat = async () => {
-    // Optionally wipe previous chat context on the backend
     if (sessionId && chatId) {
       try {
         await fetch(`${API_BASE_URL}/api/session/clear`, {
           method: 'DELETE',
-          headers: {
-            'X-Session-ID': sessionId,
-            'X-Chat-ID': chatId,
-          },
+          headers: { 'X-Session-ID': sessionId, 'X-Chat-ID': chatId },
         });
       } catch (err) {
         console.error('Failed to wipe old chat context:', err);
       }
     }
-
-    // Generate a fresh chat ID and reset local chat UI
     setChatId(createNewChatId());
     setMessages([]);
-    setFile(null);
-    setUploadStatus('');
+    setAttachedFiles([]);
+    setIsSidebarOpen(false);
   };
 
-  // Upload & Ingest File
-  const handleFileUpload = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsUploading(true);
-    setUploadStatus('Processing document...');
+    const fileId = crypto.randomUUID();
+    const ext = file.name.split('.').pop()?.toUpperCase() || 'FILE';
+
+    const newFileBadge: UploadedFile = {
+      id: fileId,
+      name: file.name,
+      extension: ext,
+      isUploading: true,
+    };
+
+    setAttachedFiles((prev) => [...prev, newFileBadge]);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -100,29 +111,27 @@ export default function ChatPage() {
         body: formData,
       });
 
-      const data = await response.json();
-
       if (response.ok) {
-        setUploadStatus(`Uploaded successfully: ${data.file_name}`);
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            sender: 'agent',
-            text: `📄 Document "${file.name}" ingested into this chat session! Ask me anything about it.`,
-          },
-        ]);
+        setAttachedFiles((prev) =>
+          prev.map((f) => (f.id === fileId ? { ...f, isUploading: false } : f))
+        );
       } else {
-        setUploadStatus(`Error: ${data.detail || 'Failed to upload document'}`);
+        const data = await response.json();
+        alert(`Ingestion failed: ${data.detail || 'Unknown error'}`);
+        removeFile(fileId);
       }
     } catch (err) {
-      setUploadStatus('Error: Could not connect to backend server.');
+      alert('Network error while processing file.');
+      removeFile(fileId);
     } finally {
-      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  // Submit Query
+  const removeFile = (fileId: string) => {
+    setAttachedFiles((prev) => prev.filter((f) => f.id !== fileId));
+  };
+
   const handleSendQuery = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputQuery.trim() || isQuerying) return;
@@ -134,7 +143,7 @@ export default function ChatPage() {
     };
 
     setMessages((prev) => [...prev, userMsg]);
-    const currentQuery = inputQuery;
+    const query = inputQuery;
     setInputQuery('');
     setIsQuerying(true);
 
@@ -146,7 +155,7 @@ export default function ChatPage() {
           'X-Session-ID': sessionId,
           'X-Chat-ID': chatId,
         },
-        body: JSON.stringify({ query: currentQuery }),
+        body: JSON.stringify({ query }),
       });
 
       const data = await response.json();
@@ -167,7 +176,7 @@ export default function ChatPage() {
           {
             id: crypto.randomUUID(),
             sender: 'agent',
-            text: `⚠️ ${data.detail || 'An error occurred while answering.'}`,
+            text: `⚠️ ${data.detail || 'An error occurred.'}`,
           },
         ]);
       }
@@ -177,7 +186,7 @@ export default function ChatPage() {
         {
           id: crypto.randomUUID(),
           sender: 'agent',
-          text: '⚠️ Unable to connect to backend server.',
+          text: '⚠️ Unable to reach backend service.',
         },
       ]);
     } finally {
@@ -186,64 +195,78 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-screen bg-gray-900 text-gray-100 font-sans">
-      {/* Sidebar Controls */}
-      <aside className="w-80 bg-gray-800 border-r border-gray-700 p-4 flex flex-col justify-between">
-        <div className="space-y-6">
+    <div className="flex h-[100dvh] bg-[#18181b] text-gray-100 font-sans overflow-hidden">
+      {/* Mobile Overlay */}
+      {isSidebarOpen && (
+        <div
+          onClick={() => setIsSidebarOpen(false)}
+          className="fixed inset-0 bg-black/60 z-40 sm:hidden backdrop-blur-sm"
+        />
+      )}
+
+      {/* Sidebar Drawer */}
+      <aside
+        className={`fixed sm:static inset-y-0 left-0 z-50 w-72 bg-[#0f0f11] border-r border-gray-800 p-4 flex flex-col justify-between transform transition-transform duration-200 ease-in-out ${
+          isSidebarOpen ? 'translate-x-0' : '-translate-x-full sm:translate-x-0'
+        }`}
+      >
+        <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h1 className="text-xl font-bold text-indigo-400">RAG Doc Agent</h1>
+            <h1 className="text-lg font-bold text-indigo-400">DocAgent RAG</h1>
             <button
-              onClick={handleNewChat}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3 py-2 rounded-lg transition font-medium"
+              onClick={() => setIsSidebarOpen(false)}
+              className="sm:hidden text-gray-400 p-1"
             >
-              + New Chat
+              ✕
             </button>
           </div>
 
-          {/* Document Ingestion Form */}
-          <div className="bg-gray-700/50 p-4 rounded-xl border border-gray-600 space-y-3">
-            <h2 className="text-sm font-semibold text-gray-300">
-              Ingest Document
-            </h2>
-            <form onSubmit={handleFileUpload} className="space-y-3">
-              <input
-                type="file"
-                onChange={(e) => setFile(e.target.files?.[0] || null)}
-                accept=".pdf,.png,.jpg,.jpeg,.txt,.md"
-                className="block w-full text-xs text-gray-400 file:mr-2 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
-              />
-              <button
-                type="submit"
-                disabled={!file || isUploading}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-600 text-white text-xs py-2 rounded-lg font-medium transition"
-              >
-                {isUploading ? 'Ingesting...' : 'Upload & Ingest'}
-              </button>
-            </form>
-            {uploadStatus && (
-              <p className="text-xs text-gray-400 mt-2 break-words">
-                {uploadStatus}
-              </p>
-            )}
-          </div>
+          <button
+            onClick={handleNewChat}
+            className="w-full bg-[#27272a] hover:bg-[#3f3f46] text-white py-2.5 px-4 rounded-xl text-sm font-medium flex items-center justify-center space-x-2 transition border border-gray-700/50"
+          >
+            <span>+</span>
+            <span>New Chat</span>
+          </button>
         </div>
 
-        {/* Active Session Info */}
-        <div className="text-[10px] text-gray-500 space-y-1 bg-gray-900/40 p-3 rounded-lg border border-gray-800">
-          <p className="truncate">Session ID: {sessionId}</p>
-          <p className="truncate">Chat ID: {chatId}</p>
+        <div className="text-[11px] text-gray-500 bg-[#18181b] p-3 rounded-xl border border-gray-800 space-y-1">
+          <p className="truncate">Session: {sessionId || 'Loading...'}</p>
+          <p className="truncate">Chat: {chatId || 'Loading...'}</p>
         </div>
       </aside>
 
-      {/* Main Chat View */}
-      <main className="flex-1 flex flex-col">
-        {/* Messages Window */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+      {/* Main Container */}
+      <main className="flex-1 flex flex-col relative min-w-0">
+        {/* Mobile Header */}
+        <header className="sm:hidden flex items-center justify-between p-4 border-b border-gray-800 bg-[#0f0f11]">
+          <button
+            onClick={() => setIsSidebarOpen(true)}
+            className="text-gray-300 p-2 rounded-lg bg-gray-800"
+          >
+            ☰
+          </button>
+          <span className="font-semibold text-sm text-indigo-400">DocAgent</span>
+          <button
+            onClick={handleNewChat}
+            className="text-xs bg-indigo-600 px-3 py-1.5 rounded-lg text-white"
+          >
+            + New
+          </button>
+        </header>
+
+        {/* Messages View */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
           {messages.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-gray-500 space-y-2">
-              <p className="text-lg">No messages in this chat thread.</p>
-              <p className="text-sm">
-                Upload a document in the sidebar to begin asking questions!
+            <div className="h-full flex flex-col items-center justify-center text-center p-6 space-y-3">
+              <div className="w-14 h-14 bg-indigo-600/20 text-indigo-400 rounded-2xl flex items-center justify-center text-2xl font-bold">
+                📄
+              </div>
+              <h2 className="text-xl sm:text-2xl font-semibold text-gray-200">
+                What can I help with today?
+              </h2>
+              <p className="text-xs sm:text-sm text-gray-400 max-w-sm">
+                Attach a PDF, PNG, or TXT file using the + button below to start asking questions.
               </p>
             </div>
           ) : (
@@ -255,16 +278,16 @@ export default function ChatPage() {
                 }`}
               >
                 <div
-                  className={`max-w-xl rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+                  className={`max-w-[85%] sm:max-w-xl rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                     msg.sender === 'user'
-                      ? 'bg-indigo-600 text-white rounded-br-none'
-                      : 'bg-gray-800 text-gray-200 border border-gray-700 rounded-bl-none'
+                      ? 'bg-indigo-600 text-white rounded-br-sm'
+                      : 'bg-[#27272a] text-gray-200 border border-gray-700/60 rounded-bl-sm'
                   }`}
                 >
                   <p className="whitespace-pre-wrap">{msg.text}</p>
                   {msg.sourcesCount !== undefined && (
                     <span className="block text-[10px] text-gray-400 mt-2 border-t border-gray-700/60 pt-1">
-                      Retrieved from {msg.sourcesCount} relevant document chunk(s)
+                      Retrieved from {msg.sourcesCount} document chunk(s)
                     </span>
                   )}
                 </div>
@@ -274,27 +297,77 @@ export default function ChatPage() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Query Input Bar */}
-        <footer className="p-4 bg-gray-800 border-t border-gray-700">
-          <form
-            onSubmit={handleSendQuery}
-            className="flex items-center space-x-3 max-w-4xl mx-auto"
-          >
-            <input
-              type="text"
-              value={inputQuery}
-              onChange={(e) => setInputQuery(e.target.value)}
-              placeholder="Ask a question about your ingested document..."
-              className="flex-1 bg-gray-900 text-gray-100 placeholder-gray-500 border border-gray-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-indigo-500"
-            />
-            <button
-              type="submit"
-              disabled={!inputQuery.trim() || isQuerying}
-              className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-700 text-white text-sm px-5 py-3 rounded-xl font-medium transition"
+        {/* Input Bar (Claude Mobile Design) */}
+        <footer className="p-3 sm:p-4 bg-[#0f0f11] border-t border-gray-800/80">
+          <div className="max-w-3xl mx-auto">
+            {/* Attached Files Badges Container */}
+            {attachedFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-2 px-1">
+                {attachedFiles.map((f) => (
+                  <div
+                    key={f.id}
+                    className="flex items-center space-x-2 bg-[#27272a] border border-gray-700/80 rounded-xl px-3 py-1.5 text-xs shadow-sm"
+                  >
+                    {f.isUploading ? (
+                      <span className="w-3.5 h-3.5 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <span className="text-indigo-400 text-xs">📄</span>
+                    )}
+                    <span className="max-w-[120px] truncate text-gray-200 font-medium">
+                      {f.name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeFile(f.id)}
+                      className="ml-1 p-1 hover:bg-gray-700 rounded-full text-gray-400 hover:text-red-400 transition"
+                      aria-label="Remove document"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Input Form Pill */}
+            <form
+              onSubmit={handleSendQuery}
+              className="flex items-center bg-[#18181b] border border-gray-700/80 rounded-2xl px-3 py-2 focus-within:border-indigo-500 transition shadow-inner"
             >
-              {isQuerying ? 'Thinking...' : 'Send'}
-            </button>
-          </form>
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileSelect}
+                accept=".pdf,.png,.jpg,.jpeg,.txt,.md"
+                className="hidden"
+              />
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-2 text-gray-400 hover:text-indigo-400 hover:bg-gray-800 rounded-xl transition"
+                title="Attach Document"
+              >
+                📎
+              </button>
+
+              <input
+                type="text"
+                value={inputQuery}
+                onChange={(e) => setInputQuery(e.target.value)}
+                placeholder="Ask about text, tables, or diagrams..."
+                className="flex-1 bg-transparent text-gray-100 placeholder-gray-500 px-3 py-1.5 text-sm focus:outline-none"
+              />
+
+              <button
+                type="submit"
+                disabled={!inputQuery.trim() || isQuerying}
+                className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-gray-800 disabled:text-gray-600 text-white p-2.5 rounded-xl transition flex items-center justify-center min-w-[38px]"
+              >
+                {isQuerying ? '...' : '➔'}
+              </button>
+            </form>
+          </div>
         </footer>
       </main>
     </div>
