@@ -408,8 +408,8 @@ function PdfPreview({
         ) : (
           <PdfDocument
             file={fileUrl}
-            onLoadSuccess={({ numPages: n }) => setNumPages(n)}
-            onLoadError={(err) => setLoadError(err?.message || 'Unknown error')}
+            onLoadSuccess={(pdf: { numPages: number }) => setNumPages(pdf.numPages)}
+            onLoadError={(error: Error) => setLoadError(error?.message || 'Unknown error')}
             loading={
               <div className="flex flex-col items-center justify-center gap-2 py-20 text-sm text-slate-400 dark:text-slate-500">
                 <Loader2 className="w-5 h-5 animate-spin" />
