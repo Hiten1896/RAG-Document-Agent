@@ -37,8 +37,17 @@ LEGACY_FORMAT_ADVICE = {
 }
 
 
-def load_pdf_fast(file_path: str, enable_ocr_fallback: bool = False) -> List[Unit]:
-    """Fast PDF extraction. Extracts digital text directly; falls back to OCR only if empty."""
+def load_pdf_fast(file_path: str, enable_ocr_fallback: bool = True) -> List[Unit]:
+    """Fast PDF extraction. Extracts digital text directly; falls back to OCR only if empty.
+
+    enable_ocr_fallback defaults to True because EXTENSION_PARSERS dispatches
+    every parser with a single positional arg (`parser(file_path)`), so this
+    default is effectively the only value that will ever be used in
+    production. A False default here was the actual bug: it silently
+    disabled OCR for every scanned PDF, regardless of whether Tesseract was
+    installed correctly, which is why scanned PDFs always failed with
+    "No text could be extracted" even though the OCR code path itself works.
+    """
     units: List[Unit] = []
     doc = fitz.open(file_path)
 

@@ -572,6 +572,16 @@ export default function Home() {
       // produces an "Failed to load PDF" viewer, so non-PDF cards simply don't
       // open a preview rather than opening a broken one.
       if (!fname.toLowerCase().endsWith('.pdf')) return;
+      // Re-opening the file that's already showing used to still mint a new
+      // blob URL every time this ran. PdfPreview resets pageNumber/zoom/
+      // loadError whenever `fileUrl` changes, so a fresh URL for the same
+      // file made the canvas reload and briefly go blank on every click —
+      // the "flickers, then normal once touched" symptom. Only the page
+      // number needs to move when it's the same file already open.
+      if (fname === viewerFile) {
+        setViewerPage(page ?? null);
+        return;
+      }
       const url = URL.createObjectURL(match.file);
       setViewerUrl((prevUrl) => {
         if (prevUrl) URL.revokeObjectURL(prevUrl);
@@ -580,7 +590,7 @@ export default function Home() {
       setViewerFile(fname);
       setViewerPage(page ?? null);
     },
-    [ingestedFiles]
+    [ingestedFiles, viewerFile]
   );
 
   const closeFileViewer = useCallback(() => {
@@ -1228,6 +1238,10 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
     setQuery('');
+    // The side panel isn't scoped to a conversation, so without this the new
+    // (empty) chat correctly says "no document uploaded" while the panel
+    // keeps showing whichever PDF was last open in the previous chat.
+    closeFileViewer();
   };
 
   const handleSwitchConversation = (id: string) => {
@@ -1236,6 +1250,9 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
     setQuery('');
+    // Same reasoning as handleNewChat: the previously open document would
+    // otherwise carry over into a conversation that never had it uploaded.
+    closeFileViewer();
   };
 
   /* Delete a conversation from the sidebar. If the deleted chat was the
