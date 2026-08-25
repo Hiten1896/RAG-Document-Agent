@@ -17,6 +17,14 @@
    controls, and the initial canvas background. */
 :root {
   color-scheme: light dark;
+
+  /* Slim-scrollbar palette, consumed by .scrollbar-slim below. Kept as custom
+     properties so the legacy ::-webkit-scrollbar fallback inherits them
+     without duplicating any values. Literal hex (slate-300/slate-700) rather
+     than theme() — that's v3 syntax, and hardcoding avoids depending on
+     Tailwind's generated variable names. */
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-track: transparent;
 }
 
 html.light {
@@ -25,15 +33,71 @@ html.light {
 
 html.dark {
   color-scheme: dark;
+  --scrollbar-thumb: #334155;
 }
 
 body {
   @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
 }
 
-/* Used by the mic-error toast in page.tsx. It referenced `animate-fade-in`,
-   which was never defined, so the toast appeared with no transition. */
+/* ───── Slim scrollbar ─────
+   The sidebar and the viewer body scroll, and the platform default scrollbar
+   is heavy enough to read as a UI element in its own right — which is exactly
+   what made the chat-history list look broken. `scrollbar-width: thin` plus a
+   transparent track keeps the affordance without the chrome.
+
+   `scrollbar-gutter: stable` reserves the space up front so content does not
+   reflow by ~15px the moment the list grows past its container. */
+.scrollbar-slim {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-gutter: stable;
+}
+
+/* scrollbar-color only reached Baseline in Dec 2025 (Safari 26.2), so keep the
+   non-standard WebKit pseudo-elements for older Safari. Scoped under
+   @supports-not so browsers with both don't apply two conflicting styles. */
+@supports not (scrollbar-color: auto) {
+  .scrollbar-slim::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+
+  .scrollbar-slim::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+/* ───── Animations ─────
+   `fade-in` is opacity-only on purpose. It previously animated
+   `transform: translate(-50%, …)`, which was correct for the one centered
+   element it was written for (the mic toast) but wrong everywhere else it got
+   reused — the chat-row dropdown, the desktop viewer panel, and the mobile
+   backdrop are not centered, so each visibly jumped half its own width for the
+   duration of the animation. Keeping this keyframe free of `transform` makes it
+   safe to apply to any element. */
 @keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.15s ease-out;
+}
+
+/* The centered toast keeps its own keyframe, which must restate the -50% X
+   offset because an animation on `transform` replaces the `-translate-x-1/2`
+   utility for as long as it runs. */
+@keyframes toast-in {
   from {
     opacity: 0;
     transform: translate(-50%, -0.5rem);
@@ -44,6 +108,47 @@ body {
   }
 }
 
-.animate-fade-in {
-  animation: fade-in 0.2s ease-out;
+.animate-toast-in {
+  animation: toast-in 0.2s ease-out;
+}
+
+/* Desktop document panel: slides in from the right edge it is docked to. */
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(1.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-panel-in {
+  animation: panel-in 0.2s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Mobile document sheet: rises from the bottom. Previously defined in an inline
+   <style> element inside the component's JSX, which re-injected a stylesheet
+   into the DOM on every open. */
+@keyframes sheet-up {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.animate-sheet-up {
+  animation: sheet-up 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* Honour a reduced-motion preference: keep the opacity fades (they convey
+   state without implying movement) but drop the travel. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-panel-in,
+  .animate-sheet-up {
+    animation: fade-in 0.15s ease-out;
+  }
 }
