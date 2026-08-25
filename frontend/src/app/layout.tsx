@@ -26,6 +26,10 @@ export const viewport: Viewport = {
   // Renders <meta name="color-scheme"> so the browser knows both schemes are
   // supported before first paint, which keeps native UI from flashing white.
   colorScheme: "light dark",
+  // Required for env(safe-area-inset-*) to report anything but 0. Without it
+  // the mobile document sheet's footer controls sit under the home indicator
+  // on notched iPhones.
+  viewportFit: "cover",
 };
 
 // Runs before first paint, so the pinned theme is already on <html> by the time
