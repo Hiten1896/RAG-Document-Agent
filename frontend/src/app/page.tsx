@@ -1392,12 +1392,21 @@ export default function Home() {
               is intentionally lost on reload, same as the rest of the app's
               state. Not persisted to storage. Each row reveals a ⋯ menu on
               hover (always visible on touch) with a Delete action, same
-              pattern as Claude's own chat list. */}
+              pattern as Claude's own chat list.
+
+              No separate scroll container/height cap here: the outer sidebar
+              body (line ~1330) is already `overflow-y-auto flex-1`, so this
+              list just grows with it. Nesting a second `overflow-y-auto` +
+              `max-h-48` here was clipping the list to ~192px regardless of
+              how much vertical room the sidebar actually had, forcing its
+              own cramped scrollbar and making the per-row ⋯ menu (which is
+              absolutely positioned relative to each row) collide with that
+              inner scrollbar. */}
           <div className="space-y-2">
             <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
               Chat History
             </label>
-            <div className="space-y-1 max-h-48 overflow-y-auto pr-0.5">
+            <div className="space-y-1 pr-0.5">
               {conversations.map((c) => (
                 <div key={c.id} className="relative group">
                   <button

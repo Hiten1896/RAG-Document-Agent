@@ -326,6 +326,20 @@ app = FastAPI(title="RAG Document Agent", lifespan=lifespan)
 # Access-Control-Allow-Origin when credentials are included, so every preflight
 # failed. Set ALLOWED_ORIGINS (comma-separated, e.g. the Vercel URL) in
 # production; the permissive branch is for local development only.
+#
+# Every ingest/query request carries custom `X-Session-Id`/`X-Chat-Id`
+# headers plus a multipart body, so the browser always sends a CORS
+# preflight (OPTIONS) first. `allow_headers=["*"]` looks like it covers
+# that, but FastAPI/Starlette's CORSMiddleware only expands the literal
+# `"*"` into the actual request headers when `allow_credentials=False`.
+# The moment ALLOWED_ORIGINS is set (allow_credentials=True in production),
+# `"*"` stops being treated as a wildcard for headers and methods per the
+# fetch spec, so the preflight response omits X-Session-Id/X-Chat-Id from
+# Access-Control-Allow-Headers, the browser blocks the real request before
+# it's sent, and the frontend sees a bare "Failed to fetch" with no HTTP
+# status at all. Listing the headers/methods explicitly keeps this correct
+# in both the wildcard (no ALLOWED_ORIGINS set) and credentialed
+# (ALLOWED_ORIGINS set) cases.
 _allowed_origins = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "").split(",")
@@ -336,8 +350,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins or ["*"],
     allow_credentials=bool(_allowed_origins),
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Session-Id", "X-Chat-Id"],
 )
 
 
