@@ -99,10 +99,9 @@ function extractErrorMessage(errorData: unknown, fallback: string): string {
       .map((item) => {
         if (typeof item === 'string') return item;
         if (item && typeof item === 'object' && 'msg' in item) {
-          const loc = 'loc' in item && Array.isArray((item as any).loc)
-            ? (item as any).loc.join('.')
-            : undefined;
-          return loc ? `${loc}: ${(item as any).msg}` : String((item as any).msg);
+          const entry = item as { loc?: unknown; msg?: unknown };
+          const loc = Array.isArray(entry.loc) ? entry.loc.join('.') : undefined;
+          return loc ? `${loc}: ${String(entry.msg)}` : String(entry.msg);
         }
         return JSON.stringify(item);
       })
@@ -111,7 +110,7 @@ function extractErrorMessage(errorData: unknown, fallback: string): string {
   }
 
   if (detail && typeof detail === 'object') {
-    if ('msg' in (detail as any)) return String((detail as any).msg);
+    if ('msg' in detail) return String((detail as { msg?: unknown }).msg);
     try {
       return JSON.stringify(detail);
     } catch {

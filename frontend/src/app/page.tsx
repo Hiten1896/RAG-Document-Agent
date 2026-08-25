@@ -5,7 +5,12 @@ import ReactMarkdown from 'react-markdown';
 import { Document as PdfDocument, Page as PdfPage, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
-import { ingestDocument, checkIngestStatus, queryDocument, SourceMetadata } from '@/lib/api';
+import {
+  ingestDocument,
+  queryDocument,
+  clearSession,
+  SourceMetadata,
+} from '@/lib/api';
 import {
   Send,
   FileText,
@@ -83,28 +88,30 @@ function titleFromQuery(text: string): string {
   return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
 }
 
-// Asks the backend to summarize the first message into a short title using
-// the same Gemini LLM /query already relies on (GEMINI_API_KEY), rather than
-// just truncating the raw question text. Falls back to null on any failure
-// so the caller can keep the truncated title already showing — a slow or
-// failed title call should never block or disrupt sending a message.
-async function generateChatTitle(message: string): Promise<string | null> {
-  const API = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
-  try {
-    const res = await fetch(`${API}/title`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message }),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    const title = typeof data?.title === 'string' ? data.title.trim() : '';
-    return title || null;
-  } catch {
-    return null;
-  }
-}
+// Formats the backend accepts. Kept next to titleFromQuery so the upload filter
+// and the file input's `accept` attribute read from one list and can't drift
+// apart — they already had, which is how the `accept` dialog and the drop
+// handler ended up disagreeing.
+const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
+  '.pdf',
+  '.docx',
+  '.pptx',
+  '.xlsx',
+  '.csv',
+  '.txt',
+  '.md',
+  '.png',
+  '.jpg',
+  '.jpeg',
+]);
+
+const SUPPORTED_UPLOAD_LABEL = 'PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, PNG, JPG';
+
+const SUPPORTED_UPLOAD_ACCEPT = [
+  'application/pdf',
+  ...SUPPORTED_UPLOAD_EXTENSIONS,
+].join(',');
+
 
 /* ───── Brand mark ─────
    An open document with a spark of insight rising from the page — reads at
@@ -513,10 +520,11 @@ export default function Home() {
     conversations.find((c) => c.id === activeConversationId) ?? conversations[0];
   const messages = activeConversation.messages;
 
-  // Update only the active conversation's message list. Auto-titling here is
-  // just the instant fallback (truncated question text) so the sidebar has
-  // something to show immediately; requestAiTitle (below) upgrades it to a
-  // proper AI-generated title once that call resolves.
+  // Update only the active conversation's message list, titling it from the
+  // first user message. There used to be a second pass here (requestAiTitle)
+  // that asked the backend to summarize the question into a nicer title, but
+  // it POSTed to /title, a route that does not exist — so it 404'd on every
+  // send and the truncated text below was always what shipped anyway.
   const setMessagesForActive = useCallback(
     (updater: (prev: Message[]) => Message[]) => {
       setConversations((prev) =>
@@ -534,24 +542,6 @@ export default function Home() {
     },
     [activeConversationId]
   );
-
-  // Fires the /title call in the background for a conversation's first
-  // message and patches that conversation's title by id once it resolves —
-  // by id rather than "whichever chat is active", since the user may have
-  // already switched to a different conversation before the network call
-  // returns. No-ops once a conversation already has an AI title, so editing
-  // a later message never re-titles the chat.
-  const requestAiTitle = useCallback(async (conversationId: string, firstMessage: string) => {
-    const aiTitle = await generateChatTitle(firstMessage);
-    if (!aiTitle) return; // fall back stays as the truncated text — fine either way
-    setConversations((prev) =>
-      prev.map((c) =>
-        c.id === conversationId && !c.titleGenerated
-          ? { ...c, title: aiTitle, titleGenerated: true }
-          : c
-      )
-    );
-  }, []);
 
   /* Files uploaded but not yet sent with a query — shown as chips above the
      input, then attached to the next user message once sent (mirrors how
@@ -578,6 +568,10 @@ export default function Home() {
     (fname: string, page?: number) => {
       const match = ingestedFiles.find((f) => f.name === fname && f.file);
       if (!match?.file) return;
+      // react-pdf can only render PDFs. Opening a DOCX/PPTX/XLSX blob in it
+      // produces an "Failed to load PDF" viewer, so non-PDF cards simply don't
+      // open a preview rather than opening a broken one.
+      if (!fname.toLowerCase().endsWith('.pdf')) return;
       const url = URL.createObjectURL(match.file);
       setViewerUrl((prevUrl) => {
         if (prevUrl) URL.revokeObjectURL(prevUrl);
@@ -940,15 +934,13 @@ export default function Home() {
   /* Refs */
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Guards against overlapping ingest poll loops, and lets us cancel the
-  // pending timer on unmount so it can't setState on an unmounted tree.
+  // Bumped on unmount and on retry so a resolving ingest can't setState on an
+  // unmounted tree or overwrite the result of a newer attempt.
   const pollTokenRef = useRef(0);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     return () => {
       pollTokenRef.current++;
-      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
     };
   }, []);
 
@@ -1030,12 +1022,34 @@ export default function Home() {
      entry in ingestedFiles, shown as a file card (loading/success/failed),
      so one file failing doesn't hide another's progress or overwrite its result. */
   const ingestMultiple = async (files: File[]) => {
-    const pdfFiles = files.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+    // Previously filtered to `.pdf` only, so a dropped DOCX/PPTX/XLSX was
+    // discarded silently — no card, no error, nothing. The backend reads all of
+    // these now, and anything outside the list gets a failed card explaining why
+    // rather than vanishing.
+    const accepted: File[] = [];
+    const rejected: File[] = [];
+
+    for (const f of files) {
+      const dot = f.name.lastIndexOf('.');
+      const ext = dot === -1 ? '' : f.name.slice(dot).toLowerCase();
+      (SUPPORTED_UPLOAD_EXTENSIONS.has(ext) ? accepted : rejected).push(f);
+    }
+
+    if (rejected.length) {
+      setIngestedFiles((prev) => [
+        ...prev.filter((f) => !rejected.some((r) => r.name === f.name)),
+        ...rejected.map((f) => ({
+          name: f.name,
+          status: 'failed' as const,
+          error: `Unsupported file type. Supported: ${SUPPORTED_UPLOAD_LABEL}.`,
+        })),
+      ]);
+    }
 
     // Skip files that are already ingested or currently ingesting — retry
     // for a failed file goes through handleRetryIngest instead, which
     // explicitly re-triggers that one file.
-    const newFiles = pdfFiles.filter((f) => {
+    const newFiles = accepted.filter((f) => {
       const existing = ingestedFiles.find((ef) => ef.name === f.name);
       return !existing || existing.status === 'failed';
     });
@@ -1051,10 +1065,14 @@ export default function Home() {
   const triggerAutoIngest = async (fileToIngest: File) => {
     const name = fileToIngest.name;
 
-    // Each file's poll loop is invalidated only by a NEW upload of that same
-    // filename (retry), not by other files uploading concurrently.
-    const pollToken = ++pollTokenRef.current;
-    const isStale = () => pollTokenRef.current !== pollToken;
+    // Guards against a stale response overwriting a newer one for the same
+    // filename — a retry started while the first request is still in flight.
+    const requestToken = ++pollTokenRef.current;
+    const isStale = () => pollTokenRef.current !== requestToken;
+
+    // Captured now: the active chat can change while the upload is in flight,
+    // and the document must be indexed under the chat it was dropped into.
+    const targetChatId = activeConversationId;
 
     setIngestedFiles((prev) => [
       ...prev.filter((f) => f.name !== name),
@@ -1063,60 +1081,21 @@ export default function Home() {
     setPendingAttachments((prev) => (prev.includes(name) ? prev : [...prev, name]));
 
     try {
-      const res = await ingestDocument(fileToIngest);
+      // Ingestion is synchronous server-side: when this resolves the document is
+      // fully indexed. There used to be a polling loop against /status/{file}
+      // here, but no such route exists — every poll 404'd, so the card sat at
+      // "processing" until it hit the 60-attempt timeout and falsely reported
+      // failure for documents that had actually been indexed correctly.
+      const res = await ingestDocument(fileToIngest, targetChatId);
       if (isStale()) return;
 
-      let attempts = 0;
-      const maxAttempts = 60;
-
-      const poll = async () => {
-        if (isStale()) return;
-        try {
-          const statusRes = await checkIngestStatus(res.filename);
-          if (isStale()) return;
-
-          if (statusRes.status === 'completed') {
-            setIngestedFiles((prev) =>
-              prev.map((f) =>
-                f.name === name
-                  ? { ...f, status: 'completed', pages: statusRes.pages, chunks: statusRes.chunks }
-                  : f
-              )
-            );
-          } else if (statusRes.status === 'failed') {
-            setIngestedFiles((prev) =>
-              prev.map((f) =>
-                f.name === name ? { ...f, status: 'failed', error: statusRes.error } : f
-              )
-            );
-          } else {
-            // `not_found` is also treated as still-pending: the background task
-            // may not have registered the job yet.
-            attempts++;
-            if (attempts < maxAttempts) {
-              pollTimerRef.current = setTimeout(poll, 1000);
-            } else {
-              setIngestedFiles((prev) =>
-                prev.map((f) =>
-                  f.name === name
-                    ? { ...f, status: 'failed', error: 'Timed out waiting for the backend to finish indexing.' }
-                    : f
-                )
-              );
-            }
-          }
-        } catch (err: unknown) {
-          // This used to be a bare `catch {}` that only flipped off the spinner,
-          // so a failing status endpoint looked like "nothing happened at all".
-          if (isStale()) return;
-          const message = getErrorMessage(err, 'Could not reach the status endpoint.');
-          setIngestedFiles((prev) =>
-            prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
-          );
-        }
-      };
-
-      pollTimerRef.current = setTimeout(poll, 800);
+      setIngestedFiles((prev) =>
+        prev.map((f) =>
+          f.name === name
+            ? { ...f, status: 'completed', pages: res.pages, chunks: res.chunks }
+            : f
+        )
+      );
     } catch (err: unknown) {
       if (isStale()) return;
       const message = getErrorMessage(err, 'Failed to communicate with backend.');
@@ -1142,13 +1121,10 @@ export default function Home() {
     const userText = query.trim();
     const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
     // Captured before the async gap below — the active conversation could
-    // change while this request is in flight, and the title patch must land
-    // on the conversation the message was actually sent in, not whichever
-    // one happens to be active when the network call resolves.
+    // change while this request is in flight, and the backend filters
+    // retrieval on the chat id, so the answer must come from the vectors of
+    // the conversation the message was actually sent in.
     const targetConversationId = activeConversationId;
-    const isFirstUserMessage =
-      !activeConversation.titleGenerated &&
-      !activeConversation.messages.some((m) => m.sender === 'user');
 
     setQuery('');
     setPendingAttachments([]);
@@ -1158,17 +1134,10 @@ export default function Home() {
     ]);
     setLoading(true);
 
-    if (isFirstUserMessage) {
-      // Fire-and-forget: runs alongside the actual query rather than
-      // blocking it, since generating a title has no bearing on getting an
-      // answer back.
-      requestAiTitle(targetConversationId, userText);
-    }
-
     try {
       // No `source` filter is passed, so the backend searches across every
       // ingested document's chunks rather than restricting to one file.
-      const res = await queryDocument(userText);
+      const res = await queryDocument(userText, targetConversationId);
       setMessagesForActive((prev) => [
         ...prev,
         { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
@@ -1215,15 +1184,21 @@ export default function Home() {
     });
 
     if (isEditingFirstUserMessage) {
+      // Re-title directly from the edited text. `setMessagesForActive` only
+      // titles a conversation still called "New Chat", so flipping
+      // `titleGenerated` alone would leave the old title in the sidebar.
       setConversations((prev) =>
-        prev.map((c) => (c.id === targetConversationId ? { ...c, titleGenerated: false } : c))
+        prev.map((c) =>
+          c.id === targetConversationId
+            ? { ...c, title: titleFromQuery(updatedQuery), titleGenerated: false }
+            : c
+        )
       );
-      requestAiTitle(targetConversationId, updatedQuery);
     }
 
     setLoading(true);
     try {
-      const res = await queryDocument(updatedQuery);
+      const res = await queryDocument(updatedQuery, targetConversationId);
       setMessagesForActive((prev) => [
         ...prev,
         { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
@@ -1268,6 +1243,11 @@ export default function Home() {
      or, if that was the last chat left, opens a fresh "New Chat" instead
      of leaving the UI with no conversation selected at all. */
   const handleDeleteConversation = (id: string) => {
+    // Free the chat's vectors on the backend. The store is in-process on a
+    // 512MB instance, so a deleted conversation's chunks would otherwise sit
+    // there until the TTL sweep. Deliberately not awaited, and clearSession
+    // never throws, so a failure here can't block the delete.
+    void clearSession(id);
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id);
       if (id === activeConversationId) {
@@ -1310,7 +1290,7 @@ export default function Home() {
       <input
         ref={fileInputRef}
         type="file"
-        accept="application/pdf,.pdf"
+        accept={SUPPORTED_UPLOAD_ACCEPT}
         onChange={handleFileChange}
         className="hidden"
         id="file-auto-upload"
