@@ -44,7 +44,16 @@ def _load_models() -> List[str]:
         if m not in models:
             models.append(m)
     if not models:
-        models = ["gemini-2.5-flash", "gemini-1.5-flash"]
+        # `gemini-2.5-flash` and `gemini-1.5-flash` used to be the defaults and
+        # both now 404 for newly issued API keys ("no longer available to new
+        # users"), which took /api/query down with a 503 on every request.
+        #
+        # Order matters more than it looks: the google-genai SDK retries a 429
+        # internally with backoff for ~35s before raising, so a first entry that
+        # is out of quota adds that delay to every single answer. A concrete,
+        # verified model goes first; the floating alias is the fallback that keeps
+        # this from rotting again.
+        models = ["gemini-3.5-flash", "gemini-flash-latest"]
     return models
 
 
