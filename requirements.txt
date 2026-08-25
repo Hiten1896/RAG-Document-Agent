@@ -8,6 +8,10 @@ python-multipart==0.0.32
 python-dotenv==1.2.3
 pydantic==2.13.4
 requests==2.32.5
+# Only used when USE_SYSTEM_CERT_STORE is truthy, to read CA certificates from
+# the OS trust store instead of certifi's bundle. Needed on dev machines whose
+# antivirus or proxy intercepts TLS; unnecessary on Render.
+truststore==0.10.4
 
 # RAG pipeline
 langchain==1.3.15
@@ -21,6 +25,14 @@ chromadb==1.5.9
 # of running a local model — Render's free-tier 512MB RAM can't reliably
 # hold torch + sentence-transformers without risking an OOM crash.
 
-# PDF parsing
+# Document parsing. All pure-Python wheels — no system packages beyond the
+# tesseract binary the Dockerfile already installs, and light enough for
+# Render's 512MB tier (openpyxl is read in streaming mode, see document_loaders).
 pymupdf==1.28.2
-pytesseract
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5
+pytesseract==0.3.13
+# Imported directly by document_loaders.py for OCR image handling. It arrives
+# transitively via pytesseract, but a direct import belongs in the manifest.
+pillow==12.3.0

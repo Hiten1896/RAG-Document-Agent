@@ -15,6 +15,11 @@ chroma_db/
 data/chroma_db/
 temp_*
 
+# Local scratch: generated test fixtures and one-off verification scripts.
+_fixtures/
+_mkfixtures.py
+_testloaders.py
+
 # Uploaded documents are user data, not source. `.gitkeep` is kept.
 data/uploads/*
 !data/uploads/.gitkeep
