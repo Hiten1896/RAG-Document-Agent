@@ -37,6 +37,9 @@ import {
   ChevronRight,
   ZoomIn,
   ZoomOut,
+  RefreshCw,
+  Copy,
+  Check,
 } from 'lucide-react';
 
 // react-pdf renders PDFs itself via pdf.js instead of relying on the
@@ -1233,6 +1236,61 @@ export default function Home() {
     }
   };
 
+  /* Retry — re-sends an existing user message unchanged and replaces
+     everything after it with a freshly generated answer. Shares the same
+     slice-then-append shape as handleSaveEdit, but skips the text-editing
+     step entirely: `targetIndex` is always a user message's index, whether
+     the click came from that message's own Retry button or from the
+     following agent message's Retry button (resolved by the caller to the
+     preceding user message first). */
+  const handleRetry = async (targetIndex: number) => {
+    if (loading) return;
+    const target = messages[targetIndex];
+    if (!target || target.sender !== 'user') return;
+
+    const retryQuery = target.text;
+    const targetConversationId = activeConversationId;
+
+    setMessagesForActive((prev) => {
+      const sliced = prev.slice(0, targetIndex);
+      sliced.push({ sender: 'user', text: retryQuery, attachedFiles: target.attachedFiles });
+      return sliced;
+    });
+
+    setLoading(true);
+    try {
+      const res = await queryDocument(retryQuery, targetConversationId);
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+      ]);
+    } catch (err: unknown) {
+      const message = getErrorMessage(err, 'Unknown error');
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'agent', text: `Error regenerating answer: ${message}` },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /* Copy — copies a message's raw text to the clipboard and briefly swaps
+     the button icon to a checkmark for feedback, the same pattern Claude's
+     own UI uses. `copiedIndex` is cleared automatically after a short delay. */
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const handleCopy = async (index: number, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIndex(index);
+      setTimeout(() => setCopiedIndex((prev) => (prev === index ? null : prev)), 1500);
+    } catch {
+      // Clipboard access can fail (permissions, insecure context) — nothing
+      // useful to recover into here, so it just silently doesn't flash the
+      // checkmark rather than surfacing an error for a non-critical action.
+    }
+  };
+
   /* New Chat — starts a fresh conversation and adds it to the sidebar
      history list, rather than wiping the current one. History is session-only
      by design: it lives in component state and is gone on reload. */
@@ -1795,16 +1853,52 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Edit button */}
-                  {isUser && !isEditing && (
-                    <button
-                      type="button"
-                      onClick={() => handleStartEdit(index, msg.text)}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1 text-xs text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 flex items-center gap-1 px-1 py-0.5 cursor-pointer"
-                      title="Edit this query and regenerate response"
-                    >
-                      <Edit3 className="w-3 h-3" /> Edit
-                    </button>
+                  {/* Action row — icon-only buttons that fade in on hover,
+                      matching the reference style: user messages get
+                      Retry / Edit / Copy, agent messages get Retry / Copy
+                      only (there's nothing to "edit" on a generated
+                      answer). Retry on a user message re-sends it as-is;
+                      Retry on an agent message re-runs the user question
+                      immediately before it. */}
+                  {!isEditing && (
+                    <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleRetry(isUser ? index : index - 1)}
+                        disabled={loading}
+                        className="p-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={isUser ? 'Retry this query' : 'Retry — regenerate this answer'}
+                        aria-label="Retry"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+
+                      {isUser && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartEdit(index, msg.text)}
+                          className="p-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                          title="Edit this query and regenerate response"
+                          aria-label="Edit"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(index, msg.text)}
+                        className="p-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                        title="Copy"
+                        aria-label="Copy"
+                      >
+                        {copiedIndex === index ? (
+                          <Check className="w-3.5 h-3.5 text-emerald-500 dark:text-emerald-400" />
+                        ) : (
+                          <Copy className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>

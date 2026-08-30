@@ -664,8 +664,10 @@ async def query_document(
     prompt = (
         f"Context:\n{context}\n\n"
         f"Question: {question}\n\n"
-        "Answer clearly using the context provided above. Cite the document and "
-        "page/slide you drew from. If the context is missing or irrelevant, say so."
+        "Answer clearly and concisely using only the context above — get straight "
+        "to the answer without restating the question or padding with extra "
+        "background. Cite the document and page/slide you drew from. If the "
+        "context is missing or irrelevant, say so briefly."
     )
 
     client = get_gemini_client()

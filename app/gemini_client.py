@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -75,11 +75,21 @@ class GeminiClient:
         models: Optional[List[str]] = None,
         temperature: float = 0.2,
         max_retries_per_attempt: int = 2,
+        max_output_tokens: int = 1024,
     ):
         self.api_keys = api_keys if api_keys is not None else _load_api_keys()
         self.models = models if models is not None else _load_models()
         self.temperature = temperature
         self.max_retries_per_attempt = max_retries_per_attempt
+        # Response latency scales with how many tokens the model generates, so
+        # an unbounded max lets one verbose answer take far longer than the
+        # question needed. 1024 tokens is generous for a grounded QA answer
+        # with citations while cutting off runaway generations that were the
+        # single biggest lever on perceived "it's taking too long" latency.
+        # `max_tokens` is the constructor kwarg ChatGoogleGenerativeAI actually
+        # reads (not `max_output_tokens`, which is the raw Gemini API field
+        # name but isn't what this LangChain wrapper accepts).
+        self.max_output_tokens = max_output_tokens
 
         if not self.api_keys:
             raise RuntimeError(
@@ -87,6 +97,15 @@ class GeminiClient:
             )
 
         self._current_key_index = 0
+        # (model, key) -> ChatGoogleGenerativeAI. Constructing this object sets
+        # up the genai SDK's own HTTP/gRPC transport, which is real, measurable
+        # overhead — previously `_client_for` built a fresh one on every single
+        # `invoke()` call (i.e. every query), so every answer paid that setup
+        # cost on top of the actual model latency. There are at most
+        # len(models) * len(api_keys) distinct combinations ever used, so
+        # caching them on the singleton means that setup happens once per
+        # combination for the life of the process instead of once per query.
+        self._clients: Dict[tuple[str, str], ChatGoogleGenerativeAI] = {}
 
     @staticmethod
     def _classify(message: str) -> str:
@@ -102,9 +121,17 @@ class GeminiClient:
         return "unknown"
 
     def _client_for(self, model: str, key: str) -> ChatGoogleGenerativeAI:
-        return ChatGoogleGenerativeAI(
-            model=model, google_api_key=key, temperature=self.temperature
-        )
+        cache_key = (model, key)
+        client = self._clients.get(cache_key)
+        if client is None:
+            client = ChatGoogleGenerativeAI(
+                model=model,
+                google_api_key=key,
+                temperature=self.temperature,
+                max_tokens=self.max_output_tokens,
+            )
+            self._clients[cache_key] = client
+        return client
 
     def invoke(self, prompt: str):
         last_error: Optional[Exception] = None
