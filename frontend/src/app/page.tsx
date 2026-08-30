@@ -1357,12 +1357,12 @@ export default function Home() {
           border-r border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 md:bg-white md:dark:bg-slate-900/60
           backdrop-blur-xl flex flex-col justify-between shadow-2xl md:shadow-none
           transition-transform duration-250 ease-out
-          md:transition-[width,margin] md:duration-200 md:ease-out md:overflow-hidden
+          md:transition-[width,margin] md:duration-200 md:ease-out overflow-hidden
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'}
           ${desktopSidebarOpen ? 'md:w-80' : 'md:w-0 md:border-r-0'}
         `}
       >
-        <div className={`flex flex-col h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
+        <div className={`flex flex-col h-full min-h-0 p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
         {/* Fixed header block — identity, theme/collapse toggles, and the
             New Chat button never scroll. Previously this whole section
             shared one `overflow-y-auto` with the chat history list below
@@ -1445,7 +1445,7 @@ export default function Home() {
           <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 shrink-0">
             Chat History
           </label>
-          <div className="space-y-1 pr-0.5 overflow-y-auto flex-1">
+          <div className="space-y-1 pr-0.5 overflow-y-auto flex-1 min-h-0">
             {conversations.map((c) => (
                 <div key={c.id} className="relative group">
                   <button
