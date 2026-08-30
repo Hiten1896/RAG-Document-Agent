@@ -1247,6 +1247,12 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
     setQuery('');
+    // Pending attachment chips are keyed by filename and shown regardless of
+    // which conversation is active, so without this a New Chat still showed
+    // the previous chat's "uploaded" file card sitting above the composer —
+    // the empty-state greeting rendered underneath it, but it didn't look
+    // or feel like the fresh first-open screen.
+    setPendingAttachments([]);
     // The side panel isn't scoped to a conversation, so without this the new
     // (empty) chat correctly says "no document uploaded" while the panel
     // keeps showing whichever PDF was last open in the previous chat.
@@ -1259,6 +1265,10 @@ export default function Home() {
     setEditingIndex(null);
     setEditText('');
     setQuery('');
+    // Same reasoning as handleNewChat: pending attachment chips aren't
+    // scoped per-conversation, so they'd otherwise carry over into a chat
+    // that never had them uploaded.
+    setPendingAttachments([]);
     // Same reasoning as handleNewChat: the previously open document would
     // otherwise carry over into a conversation that never had it uploaded.
     closeFileViewer();
@@ -1352,8 +1362,13 @@ export default function Home() {
           ${desktopSidebarOpen ? 'md:w-80' : 'md:w-0 md:border-r-0'}
         `}
       >
-        <div className={`flex flex-col justify-between h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
-        <div className="space-y-5 overflow-y-auto flex-1 min-w-[260px]">
+        <div className={`flex flex-col h-full p-5 md:p-6 ${desktopSidebarOpen ? '' : 'md:invisible'}`}>
+        {/* Fixed header block — identity, theme/collapse toggles, and the
+            New Chat button never scroll. Previously this whole section
+            shared one `overflow-y-auto` with the chat history list below
+            it, so a long history dragged the logo and New Chat button up
+            off-screen with it instead of staying put. */}
+        <div className="space-y-5 shrink-0 min-w-[260px]">
           {/* Identity — logo and name side by side as one unit, that unit
               centered in the sidebar (not stacked/centered separately). */}
           <div className="flex items-center justify-center gap-3 pt-1">
@@ -1413,27 +1428,25 @@ export default function Home() {
           >
             <MessageSquarePlus className="w-4 h-4 text-indigo-600 dark:text-indigo-400" /> New Chat
           </button>
+        </div>
 
-          {/* Chat History — session-only: lives in memory for this tab and
-              is intentionally lost on reload, same as the rest of the app's
-              state. Not persisted to storage. Each row reveals a ⋯ menu on
-              hover (always visible on touch) with a Delete action, same
-              pattern as Claude's own chat list.
+        {/* Chat History — session-only: lives in memory for this tab and
+            is intentionally lost on reload, same as the rest of the app's
+            state. Not persisted to storage. Each row reveals a ⋯ menu on
+            hover (always visible on touch) with a Delete action, same
+            pattern as Claude's own chat list.
 
-              No separate scroll container/height cap here: the outer sidebar
-              body (line ~1330) is already `overflow-y-auto flex-1`, so this
-              list just grows with it. Nesting a second `overflow-y-auto` +
-              `max-h-48` here was clipping the list to ~192px regardless of
-              how much vertical room the sidebar actually had, forcing its
-              own cramped scrollbar and making the per-row ⋯ menu (which is
-              absolutely positioned relative to each row) collide with that
-              inner scrollbar. */}
-          <div className="space-y-2">
-            <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
-              Chat History
-            </label>
-            <div className="space-y-1 pr-0.5">
-              {conversations.map((c) => (
+            This is the only scrollable region in the sidebar now: it takes
+            the remaining height (`flex-1 min-h-0`) below the fixed header
+            above and the fixed footer below, and scrolls independently of
+            both — so a long history never pushes the logo/New Chat button
+            or the backend-status footer out of view. */}
+        <div className="space-y-2 flex-1 min-h-0 flex flex-col mt-5 min-w-[260px]">
+          <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 shrink-0">
+            Chat History
+          </label>
+          <div className="space-y-1 pr-0.5 overflow-y-auto flex-1">
+            {conversations.map((c) => (
                 <div key={c.id} className="relative group">
                   <button
                     type="button"
@@ -1491,14 +1504,12 @@ export default function Home() {
                     </div>
                   )}
                 </div>
-              ))}
-            </div>
+            ))}
           </div>
-
         </div>
 
         {/* Backend Status Footer */}
-        <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px]">
+        <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px] shrink-0">
           <span>Backend Pipeline:</span>
           {backendOnline === null ? (
             <span className="inline-flex items-center gap-1.5 text-slate-500 dark:text-slate-400 font-medium">
