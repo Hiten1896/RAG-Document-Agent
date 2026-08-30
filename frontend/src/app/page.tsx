@@ -650,38 +650,38 @@ export default function Home() {
      in localStorage across reloads/sessions. */
   const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
     morning: [
-      { headline: 'Good morning.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
-      { headline: 'Morning. Ready when you are.', subtext: 'Upload a document or ask about one already shared, and I\u2019ll dig in.' },
-      { headline: 'Rise and shine.', subtext: 'Bring a PDF, or ask about the ones already here — text, tables, or diagrams.' },
-      { headline: 'Morning. Let\u2019s get into it.', subtext: 'Share a document to start, or ask about one you\u2019ve already uploaded.' },
-      { headline: 'Good morning — first thing on the list?', subtext: 'Drop in a PDF, or ask about text, tables, or diagrams within one.' },
+      { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
+      { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
+      { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
+      { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
+      { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
     ],
     afternoon: [
-      { headline: 'Good afternoon.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
-      { headline: 'Afternoon. What are we digging into?', subtext: 'Share a document or pick up where an earlier one left off.' },
-      { headline: 'Good afternoon — what can I help with?', subtext: 'Text, tables, diagrams — ask about anything you\u2019ve shared.' },
-      { headline: 'Afternoon. Ready when you are.', subtext: 'Upload a PDF, or ask about one that\u2019s already here.' },
-      { headline: 'Good afternoon — let\u2019s take a look.', subtext: 'Drop in a document and I\u2019ll help you work through it.' },
+      { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
+      { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
+      { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
+      { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
+      { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
     ],
     evening: [
-      { headline: 'Good evening.', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
-      { headline: 'Evening. What can I help with?', subtext: 'Upload something new or ask about a document already on hand.' },
-      { headline: 'Good evening — let\u2019s take a look.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
-      { headline: 'Evening. Ready when you are.', subtext: 'Drop in a document to get started, or pick up an earlier one.' },
-      { headline: 'Good evening — what\u2019s on the list?', subtext: 'Share a PDF and I\u2019ll help you get through it.' },
+      { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
+      { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
+      { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
+      { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
+      { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
     ],
     night: [
-      { headline: 'Still up? What can I help with?', subtext: "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared." },
-      { headline: 'Working late?', subtext: 'Share a document and I\u2019ll help you get through it.' },
-      { headline: 'Burning the midnight oil.', subtext: 'Upload a PDF or ask about one already shared — I\u2019m here.' },
-      { headline: 'Late one, huh?', subtext: 'Drop in a document, or ask about one you\u2019ve already shared.' },
-      { headline: 'Still up. Let\u2019s make it count.', subtext: 'Share a PDF, or ask about text, tables, or diagrams within one.' },
+      { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
+      { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
+      { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
+      { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
+      { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
     ],
   };
 
   const [greeting, setGreeting] = useState('');
   const [greetingSubtext, setGreetingSubtext] = useState(
-    "Drop in a PDF, or just ask a question — I'll pull it from the documents you've shared."
+    'Add a document to get started, or ask me about something you\u2019ve already shared.'
   );
 
   useEffect(() => {
