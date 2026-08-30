@@ -1,10 +1,8 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import ReactMarkdown from 'react-markdown';
-import { Document as PdfDocument, Page as PdfPage, pdfjs } from 'react-pdf';
-import 'react-pdf/dist/Page/AnnotationLayer.css';
-import 'react-pdf/dist/Page/TextLayer.css';
 import {
   ingestDocument,
   queryDocument,
@@ -48,10 +46,25 @@ import {
 // works on most desktop browsers but mobile Safari/Chrome have no such
 // plugin, so on phones the iframe rendered blank or silently failed to
 // open at all. Canvas-based rendering here works identically on every
-// platform. pdf.js needs its worker script served from somewhere; the
-// unpkg CDN build matching the installed pdfjs-dist version avoids
-// bundling/copying the worker file into the Next.js build manually.
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+// platform. The actual react-pdf/pdfjs setup and worker config now live in
+// PdfPreview.tsx (see the dynamic import below) rather than here.
+
+// react-pdf/pdfjs is a large dependency (several hundred KB) that's only
+// ever needed once the file viewer panel actually opens — most page loads
+// never touch it. It was previously a static top-level import here, so
+// every visit paid to fetch and parse it regardless. Lighthouse flagged
+// this directly ("Reduce unused JavaScript — Est savings of 1,231 KiB",
+// 4.7s Total Blocking Time). `ssr: false` is required: pdfjs touches
+// browser-only APIs (Worker, canvas) that don't exist during server render.
+const PdfPreview = dynamic(() => import('./PdfPreview'), {
+  ssr: false,
+  loading: () => (
+    <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500 gap-2">
+      <Loader2 className="w-4 h-4 animate-spin" />
+      Loading preview…
+    </div>
+  ),
+});
 
 /* ───── Types ───── */
 interface Message {
@@ -223,15 +236,21 @@ function ChatComposer({
                     : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700'
                 }`}
               >
-                {/* Remove button */}
+                {/* Remove button — the visible badge stays small (it's an
+                    absolutely-positioned corner overlay on a narrow 168px
+                    card, so a full 44px circle would collide with the next
+                    card), but an invisible padded hit-area around it keeps
+                    the actual tap target reasonable on phones. */}
                 <button
                   type="button"
                   onClick={() => setPendingAttachments((prev) => prev.filter((n) => n !== fname))}
-                  className="absolute -top-1.5 -right-1.5 p-0.5 rounded-full bg-slate-700 dark:bg-slate-600 text-white opacity-0 group-hover:opacity-100 transition shadow-md cursor-pointer"
+                  className="absolute -top-2.5 -right-2.5 p-2 rounded-full opacity-100 pointer-fine:opacity-0 pointer-fine:group-hover:opacity-100 transition cursor-pointer"
                   aria-label={`Remove ${fname}`}
                   title="Remove"
                 >
-                  <X className="w-3 h-3" />
+                  <span className="flex items-center justify-center w-4 h-4 rounded-full bg-slate-700 dark:bg-slate-600 text-white shadow-md">
+                    <X className="w-3 h-3" />
+                  </span>
                 </button>
 
                 {/* Icon tile */}
@@ -305,22 +324,22 @@ function ChatComposer({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Ask about text, tables, or diagrams..."
-            className={`w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-11 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 ${
+            className={`w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-12 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-base sm:text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 ${
               floating ? 'shadow-md' : 'shadow-inner'
             }`}
-            autoFocus={floating}
           />
 
           {/* Mic button */}
           <button
             type="button"
             onClick={onMicClick}
-            className={`absolute right-3 p-1.5 rounded-lg transition cursor-pointer z-10 ${
+            className={`absolute right-2 p-2 min-w-10 min-h-10 flex items-center justify-center rounded-lg transition cursor-pointer z-10 ${
               listening
                 ? 'bg-red-500 text-white animate-pulse'
                 : 'text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-200 dark:hover:bg-slate-800'
             }`}
             title={listening ? 'Stop listening' : 'Voice input'}
+            aria-label={listening ? 'Stop listening' : 'Voice input'}
           >
             <Mic className="w-4 h-4" />
           </button>
@@ -331,6 +350,7 @@ function ChatComposer({
           type="submit"
           disabled={loading || !query.trim()}
           className="bg-gradient-to-tr from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 disabled:from-slate-300 dark:disabled:from-slate-800 disabled:to-slate-300 dark:disabled:to-slate-800 disabled:text-slate-400 dark:disabled:text-slate-600 text-white px-4 sm:px-6 rounded-xl sm:rounded-2xl transition duration-200 flex items-center justify-center shadow-lg shadow-indigo-600/20 font-medium text-sm shrink-0 cursor-pointer disabled:cursor-not-allowed"
+          aria-label="Send"
         >
           <Send className="w-4 h-4" />
         </button>
@@ -339,168 +359,6 @@ function ChatComposer({
   );
 }
 
-/* ───── PDF Preview ─────
-   Renders a PDF with pdf.js (via react-pdf) onto a <canvas>, instead of
-   handing a blob URL to an <iframe> and hoping the browser's native PDF
-   plugin picks it up. That native-plugin path is why the mobile viewer
-   used to fail outright — phones generally have no such plugin — and why
-   desktop quality varied: an iframe's embedded viewer doesn't scale to
-   fill its container, it just renders at whatever zoom the plugin
-   defaults to. Canvas rendering here is identical on every platform,
-   scales crisply to the container's actual width via ResizeObserver, and
-   gives real programmatic page-jump control for citations instead of the
-   "#page=N" URL-hash trick some mobile browsers ignore entirely.
-
-   Shared between the desktop side panel and the mobile bottom sheet so
-   both get the same rendering, controls, and states for free. */
-function PdfPreview({
-  fileUrl,
-  initialPage,
-  fileName,
-}: {
-  fileUrl: string;
-  initialPage: number | null;
-  fileName: string;
-}) {
-  const [numPages, setNumPages] = useState<number | null>(null);
-  const [pageNumber, setPageNumber] = useState(initialPage && initialPage > 0 ? initialPage : 1);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [zoom, setZoom] = useState(1);
-  const [containerWidth, setContainerWidth] = useState(0);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // Jump to the cited page whenever a new citation is opened (fileUrl
-  // changing means a different open/reopen of the viewer).
-  useEffect(() => {
-    setPageNumber(initialPage && initialPage > 0 ? initialPage : 1);
-    setLoadError(null);
-    setZoom(1);
-  }, [fileUrl, initialPage]);
-
-  // Track the actual rendered width of the preview area so the page
-  // scales to fill it — react-pdf renders at a fixed pixel width unless
-  // told otherwise, so without this a phone screen would either show a
-  // sliver of a desktop-sized render or require pinch-zooming just to
-  // read a normal page.
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width;
-      if (width) setContainerWidth(width);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  const goToPage = (delta: number) => {
-    setPageNumber((prev) => {
-      const next = prev + delta;
-      if (next < 1) return 1;
-      if (numPages && next > numPages) return numPages;
-      return next;
-    });
-  };
-
-  const pageWidth = containerWidth > 0 ? Math.min(containerWidth - 24, 900) * zoom : undefined;
-
-  return (
-    <div className="flex flex-col h-full min-h-0">
-      {/* Page canvas — the scrollable render area itself */}
-      <div ref={containerRef} className="flex-1 min-h-0 overflow-auto bg-slate-100 dark:bg-slate-950 flex justify-center">
-        {loadError ? (
-          <div className="flex flex-col items-center justify-center gap-2 text-center px-6 py-16 text-sm text-slate-500 dark:text-slate-400">
-            <AlertCircle className="w-6 h-6 text-red-500 dark:text-red-400" />
-            <p>Couldn&apos;t render this PDF for preview.</p>
-            <p className="text-xs text-slate-400 dark:text-slate-600">{loadError}</p>
-          </div>
-        ) : (
-          <PdfDocument
-            file={fileUrl}
-            onLoadSuccess={(pdf: { numPages: number }) => setNumPages(pdf.numPages)}
-            onLoadError={(error: Error) => setLoadError(error?.message || 'Unknown error')}
-            loading={
-              <div className="flex flex-col items-center justify-center gap-2 py-20 text-sm text-slate-400 dark:text-slate-500">
-                <Loader2 className="w-5 h-5 animate-spin" />
-                Loading preview…
-              </div>
-            }
-            className="py-3"
-          >
-            {containerWidth > 0 && (
-              <PdfPage
-                pageNumber={pageNumber}
-                width={pageWidth}
-                className="shadow-md dark:shadow-black/40 rounded-md overflow-hidden"
-                loading={
-                  <div className="flex items-center justify-center py-16 text-slate-400 dark:text-slate-500">
-                    <Loader2 className="w-5 h-5 animate-spin" />
-                  </div>
-                }
-              />
-            )}
-          </PdfDocument>
-        )}
-      </div>
-
-      {/* Controls — page navigation + zoom, theme-matched to the rest of
-          the app instead of relying on whatever chrome a native PDF
-          plugin would have bolted on. Hidden entirely while a document
-          hasn't loaded yet or failed, since there's nothing to control. */}
-      {!loadError && numPages !== null && (
-        <div className="flex items-center justify-between gap-2 px-3 py-2 border-t border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/80 shrink-0">
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => goToPage(-1)}
-              disabled={pageNumber <= 1}
-              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
-              aria-label="Previous page"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <span className="text-xs font-medium text-slate-600 dark:text-slate-300 tabular-nums px-1 min-w-[64px] text-center">
-              {pageNumber} / {numPages}
-            </span>
-            <button
-              type="button"
-              onClick={() => goToPage(1)}
-              disabled={numPages !== null && pageNumber >= numPages}
-              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
-              aria-label="Next page"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.2).toFixed(2)))}
-              disabled={zoom <= 0.5}
-              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
-              aria-label="Zoom out"
-            >
-              <ZoomOut className="w-4 h-4" />
-            </button>
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400 tabular-nums w-10 text-center">
-              {Math.round(zoom * 100)}%
-            </span>
-            <button
-              type="button"
-              onClick={() => setZoom((z) => Math.min(2.5, +(z + 0.2).toFixed(2)))}
-              disabled={zoom >= 2.5}
-              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
-              aria-label="Zoom in"
-            >
-              <ZoomIn className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 export default function Home() {
   /* Upload state — multiple files can now be ingested and queried together */
@@ -1512,7 +1370,7 @@ export default function Home() {
                       handleSwitchConversation(c.id);
                       setSidebarOpen(false);
                     }}
-                    className={`w-full text-left pl-3 pr-8 py-2 rounded-lg text-xs truncate transition cursor-pointer ${
+                    className={`w-full text-left pl-3 pr-9 py-2.5 min-h-11 rounded-lg text-xs truncate transition cursor-pointer ${
                       c.id === activeConversationId
                         ? 'bg-indigo-100 dark:bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 font-medium'
                         : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60'
@@ -1531,8 +1389,10 @@ export default function Home() {
                       e.stopPropagation();
                       setOpenMenuId((prev) => (prev === c.id ? null : c.id));
                     }}
-                    className={`absolute right-1 top-1/2 -translate-y-1/2 p-1 rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
-                      openMenuId === c.id ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60' : 'opacity-0 group-hover:opacity-100 focus:opacity-100'
+                    className={`absolute right-0.5 top-1/2 -translate-y-1/2 p-2.5 min-w-10 min-h-10 flex items-center justify-center rounded-md text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-700/60 transition cursor-pointer ${
+                      openMenuId === c.id
+                        ? 'opacity-100 bg-slate-200/70 dark:bg-slate-700/60'
+                        : 'opacity-100 pointer-fine:opacity-0 pointer-fine:group-hover:opacity-100 pointer-fine:focus:opacity-100'
                     }`}
                     aria-label={`More options for ${c.title}`}
                     aria-haspopup="menu"
@@ -1712,7 +1572,7 @@ export default function Home() {
                       <textarea
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
-                        className="w-full bg-white/10 border border-white/20 rounded-lg p-2.5 text-sm text-white placeholder-white/50 focus:outline-none focus:border-white/40 resize-y min-h-[60px]"
+                        className="w-full bg-white/10 border border-white/20 rounded-lg p-2.5 text-base sm:text-sm text-white placeholder-white/50 focus:outline-none focus:border-white/40 resize-y min-h-[60px]"
                         autoFocus
                       />
                       <div className="flex justify-end gap-2 text-xs">
@@ -1855,20 +1715,24 @@ export default function Home() {
                     </div>
                   )}
 
-                  {/* Action row — icon-only buttons that fade in on hover,
-                      matching the reference style: user messages get
-                      Retry / Edit / Copy, agent messages get Retry / Copy
-                      only (there's nothing to "edit" on a generated
-                      answer). Retry on a user message re-sends it as-is;
-                      Retry on an agent message re-runs the user question
-                      immediately before it. */}
+                  {/* Action row — icon-only buttons that fade in on hover
+                      on devices that actually have a mouse (`can-hover:`),
+                      and stay permanently visible on touch devices, since
+                      touchscreens have no hover state to reveal them with —
+                      a hover-only reveal would have made Retry/Edit/Copy
+                      unreachable on phones and tablets. Matches the
+                      reference style: user messages get Retry / Edit / Copy,
+                      agent messages get Retry / Copy only (there's nothing
+                      to "edit" on a generated answer). Retry on a user
+                      message re-sends it as-is; Retry on an agent message
+                      re-runs the user question immediately before it. */}
                   {!isEditing && (
-                    <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 mt-1 flex items-center gap-1">
+                    <div className="opacity-100 pointer-fine:opacity-0 pointer-fine:group-hover:opacity-100 pointer-fine:focus-within:opacity-100 pointer-fine:group-focus-within:opacity-100 transition-opacity duration-200 mt-1 flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => handleRetry(isUser ? index : index - 1)}
                         disabled={loading}
-                        className="p-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                         title={isUser ? 'Retry this query' : 'Retry — regenerate this answer'}
                         aria-label="Retry"
                       >
@@ -1879,7 +1743,7 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => handleStartEdit(index, msg.text)}
-                          className="p-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                          className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
                           title="Edit this query and regenerate response"
                           aria-label="Edit"
                         >
@@ -1890,7 +1754,7 @@ export default function Home() {
                       <button
                         type="button"
                         onClick={() => handleCopy(index, msg.text)}
-                        className="p-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                        className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
                         title="Copy"
                         aria-label="Copy"
                       >
@@ -2055,7 +1919,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={closeFileViewer}
-                className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition shrink-0 cursor-pointer"
+                className="p-2 min-w-10 min-h-10 flex items-center justify-center rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition shrink-0 cursor-pointer"
                 aria-label="Close file viewer"
               >
                 <X className="w-4 h-4" />
