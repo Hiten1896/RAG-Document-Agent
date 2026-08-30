@@ -1726,7 +1726,9 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => handleSaveEdit(index)}
-                          className="px-3.5 py-1.5 rounded-lg bg-white text-indigo-600 font-medium hover:bg-white/90 transition cursor-pointer"
+                          disabled={!editText.trim() || loading}
+                          className="px-3.5 py-1.5 rounded-lg bg-white text-indigo-600 font-medium hover:bg-white/90 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
+                          title={loading ? 'Waiting for the current response to finish' : undefined}
                         >
                           Save
                         </button>
@@ -1861,7 +1863,7 @@ export default function Home() {
                       Retry on an agent message re-runs the user question
                       immediately before it. */}
                   {!isEditing && (
-                    <div className="opacity-0 group-hover:opacity-100 transition-opacity duration-200 mt-1 flex items-center gap-1">
+                    <div className="opacity-0 group-hover:opacity-100 focus-within:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 mt-1 flex items-center gap-1">
                       <button
                         type="button"
                         onClick={() => handleRetry(isUser ? index : index - 1)}
