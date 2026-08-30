@@ -527,8 +527,9 @@ async def ingest_document(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "No text could be extracted from this document. If it is a "
-                    "scanned PDF, it needs OCR before upload."
+                    "No text could be extracted from this document. Scanned "
+                    "(image-only) documents are not supported — please upload "
+                    "a version with selectable text."
                 ),
             )
 

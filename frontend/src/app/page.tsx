@@ -100,12 +100,9 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
   '.csv',
   '.txt',
   '.md',
-  '.png',
-  '.jpg',
-  '.jpeg',
 ]);
 
-const SUPPORTED_UPLOAD_LABEL = 'PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, PNG, JPG';
+const SUPPORTED_UPLOAD_LABEL = 'PDF, DOCX, PPTX, XLSX, CSV, TXT, MD';
 
 const SUPPORTED_UPLOAD_ACCEPT = [
   'application/pdf',

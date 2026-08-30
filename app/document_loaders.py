@@ -15,14 +15,6 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-import pytesseract
-from PIL import Image
-
-# Cross-platform Tesseract executable configuration
-if os.name == 'nt':
-    default_win_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-    if os.path.exists(default_win_path):
-        pytesseract.pytesseract.tesseract_cmd = default_win_path
 
 # A text unit and the human-readable location it came from.
 Unit = Tuple[str, str]
@@ -37,16 +29,14 @@ LEGACY_FORMAT_ADVICE = {
 }
 
 
-def load_pdf_fast(file_path: str, enable_ocr_fallback: bool = True) -> List[Unit]:
-    """Fast PDF extraction. Extracts digital text directly; falls back to OCR only if empty.
+def load_pdf_fast(file_path: str) -> List[Unit]:
+    """PDF extraction. Extracts digital text directly; no OCR fallback.
 
-    enable_ocr_fallback defaults to True because EXTENSION_PARSERS dispatches
-    every parser with a single positional arg (`parser(file_path)`), so this
-    default is effectively the only value that will ever be used in
-    production. A False default here was the actual bug: it silently
-    disabled OCR for every scanned PDF, regardless of whether Tesseract was
-    installed correctly, which is why scanned PDFs always failed with
-    "No text could be extracted" even though the OCR code path itself works.
+    Pages with no extractable digital text (i.e. scanned image pages) are
+    simply skipped — running OCR (Tesseract) on Render's free tier was heavy
+    enough to push the service past its memory/CPU budget and take the
+    server offline. This project intentionally does not support scanned
+    (image-only) documents.
     """
     units: List[Unit] = []
     doc = fitz.open(file_path)
@@ -55,14 +45,8 @@ def load_pdf_fast(file_path: str, enable_ocr_fallback: bool = True) -> List[Unit
         for index, page in enumerate(doc, start=1):
             page_text = page.get_text("text")
 
-            # Fast path: digital text exists
             if page_text and len(page_text.strip()) > 10:
                 units.append((f"page {index}", page_text))
-            elif enable_ocr_fallback:
-                # Slow path: scanned image page fallback (DPI reduced to 150 for speed)
-                pix = page.get_pixmap(dpi=150)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                units.append((f"page {index}", pytesseract.image_to_string(img)))
     finally:
         doc.close()
 
@@ -164,13 +148,6 @@ def load_csv(file_path: str) -> List[Unit]:
     return [("document", text)] if text.strip() else []
 
 
-def load_image(file_path: str) -> List[Unit]:
-    """Extract text from images using PyTesseract."""
-    with Image.open(file_path) as img:
-        text = pytesseract.image_to_string(img)
-    return [("image", text)] if text.strip() else []
-
-
 def load_text(file_path: str) -> List[Unit]:
     """Read plain text and markdown files."""
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -188,9 +165,6 @@ EXTENSION_PARSERS: Dict[str, Callable[[str], List[Unit]]] = {
     '.csv': load_csv,
     '.txt': load_text,
     '.md': load_text,
-    '.png': load_image,
-    '.jpg': load_image,
-    '.jpeg': load_image,
 }
 
 SUPPORTED_EXTENSIONS = frozenset(EXTENSION_PARSERS)

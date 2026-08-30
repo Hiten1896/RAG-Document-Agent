@@ -48,12 +48,18 @@ def _load_models() -> List[str]:
         # both now 404 for newly issued API keys ("no longer available to new
         # users"), which took /api/query down with a 503 on every request.
         #
+        # `gemini-3.5-flash` (used here previously) does not exist as a model
+        # id at all — every call to it 404'd immediately, so the first model
+        # in the list was dead on arrival and every request paid the cost of
+        # falling through to the second entry.
+        #
         # Order matters more than it looks: the google-genai SDK retries a 429
         # internally with backoff for ~35s before raising, so a first entry that
         # is out of quota adds that delay to every single answer. A concrete,
-        # verified model goes first; the floating alias is the fallback that keeps
-        # this from rotting again.
-        models = ["gemini-3.5-flash", "gemini-flash-latest"]
+        # verified, currently-GA model goes first; the floating "latest" alias
+        # is the fallback that keeps this from rotting again as Google renames
+        # things.
+        models = ["gemini-2.5-flash", "gemini-flash-latest"]
     return models
 
 
