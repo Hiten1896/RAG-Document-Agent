@@ -513,7 +513,15 @@ async def ingest_document(
         await save_upload(file, temp_path)
 
         try:
-            doc_data = load_document(temp_path, original_filename=filename)
+            # CPU-bound parsing (PDF/DOCX/PPTX/XLSX all do synchronous, pure
+            # Python work here) previously ran directly on the event loop,
+            # blocking every other in-flight request — including this same
+            # request's own later awaits — for the full parse duration. Off-
+            # thread keeps ingestion responsive and lets multiple uploads
+            # actually overlap instead of serializing behind one big file.
+            doc_data = await asyncio.to_thread(
+                load_document, temp_path, original_filename=filename
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:

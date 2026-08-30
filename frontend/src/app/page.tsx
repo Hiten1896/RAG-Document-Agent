@@ -207,7 +207,9 @@ function ChatComposer({
           {pendingAttachments.map((fname, idx) => {
             const fileInfo = ingestedFiles.find((f) => f.name === fname);
             const status = fileInfo?.status ?? 'processing';
-            const baseName = fname.replace(/\.pdf$/i, '');
+            const extMatch = fname.match(/\.([a-z0-9]+)$/i);
+            const extLabel = extMatch ? extMatch[1].toUpperCase() : '';
+            const baseName = extMatch ? fname.slice(0, -extMatch[0].length) : fname;
 
             return (
               <div
@@ -257,7 +259,7 @@ function ChatComposer({
                 {/* Footer: type badge + status/retry */}
                 <div className="mt-1.5 flex items-center justify-between gap-1.5">
                   <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                    PDF
+                    {extLabel}
                   </span>
                   {status === 'failed' ? (
                     <button
@@ -287,8 +289,8 @@ function ChatComposer({
           className={`bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl sm:rounded-2xl p-3 text-slate-600 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 hover:border-indigo-500/50 transition shrink-0 cursor-pointer ${
             floating ? 'shadow-sm' : ''
           }`}
-          aria-label="Add PDF documents"
-          title="Add PDF documents"
+          aria-label="Add documents"
+          title="Add documents"
         >
           <Plus className="w-4 h-4 sm:w-5 sm:h-5" />
         </button>
@@ -565,10 +567,6 @@ export default function Home() {
     (fname: string, page?: number) => {
       const match = ingestedFiles.find((f) => f.name === fname && f.file);
       if (!match?.file) return;
-      // react-pdf can only render PDFs. Opening a DOCX/PPTX/XLSX blob in it
-      // produces an "Failed to load PDF" viewer, so non-PDF cards simply don't
-      // open a preview rather than opening a broken one.
-      if (!fname.toLowerCase().endsWith('.pdf')) return;
       // Re-opening the file that's already showing used to still mint a new
       // blob URL every time this ran. PdfPreview resets pageNumber/zoom/
       // loadError whenever `fileUrl` changes, so a fresh URL for the same
@@ -576,6 +574,20 @@ export default function Home() {
       // the "flickers, then normal once touched" symptom. Only the page
       // number needs to move when it's the same file already open.
       if (fname === viewerFile) {
+        setViewerPage(page ?? null);
+        return;
+      }
+      // react-pdf can only render actual PDFs. For every other supported
+      // format (DOCX/PPTX/XLSX/CSV/TXT/MD) the panel still opens, but shows
+      // a "no in-app preview" fallback instead of PdfPreview — previously
+      // this branch returned early and did nothing, so clicking a non-PDF
+      // citation or attachment chip looked completely unresponsive.
+      if (!fname.toLowerCase().endsWith('.pdf')) {
+        setViewerUrl((prevUrl) => {
+          if (prevUrl) URL.revokeObjectURL(prevUrl);
+          return null;
+        });
+        setViewerFile(fname);
         setViewerPage(page ?? null);
         return;
       }
@@ -1535,7 +1547,7 @@ export default function Home() {
           <div className="absolute inset-0 z-30 flex items-center justify-center bg-indigo-50/90 dark:bg-indigo-950/80 border-4 border-dashed border-indigo-500 rounded-none pointer-events-none">
             <div className="flex flex-col items-center gap-2 text-indigo-700 dark:text-indigo-300">
               <FileUp className="w-10 h-10" />
-              <span className="font-medium text-sm">Drop PDF(s) to ingest</span>
+              <span className="font-medium text-sm">Drop file(s) to ingest</span>
             </div>
           </div>
         )}
@@ -1883,7 +1895,17 @@ export default function Home() {
           )}
 
           <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
-            {viewerUrl ? (
+            {viewerFile && !viewerFile.toLowerCase().endsWith('.pdf') ? (
+              <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
+                <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  In-app preview isn&apos;t available for this file type yet.
+                </p>
+                <p className="text-xs text-slate-400 dark:text-slate-600">
+                  {viewerFile}
+                </p>
+              </div>
+            ) : viewerUrl ? (
               <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
@@ -1941,7 +1963,17 @@ export default function Home() {
             )}
 
             <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-900">
-              {viewerUrl ? (
+              {viewerFile && !viewerFile.toLowerCase().endsWith('.pdf') ? (
+                <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
+                  <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    In-app preview isn&apos;t available for this file type yet.
+                  </p>
+                  <p className="text-xs text-slate-400 dark:text-slate-600">
+                    {viewerFile}
+                  </p>
+                </div>
+              ) : viewerUrl ? (
                 <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
               ) : (
                 <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
