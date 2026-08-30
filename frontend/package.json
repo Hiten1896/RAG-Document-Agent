@@ -11,10 +11,10 @@
   "dependencies": {
     "clsx": "^2.1.1",
     "lucide-react": "^1.33.0",
+    "markdown-to-jsx": "^9.10.2",
     "next": "16.3.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-markdown": "^10.1.0",
     "react-pdf": "^9.2.1",
     "tailwind-merge": "^3.6.0"
   },

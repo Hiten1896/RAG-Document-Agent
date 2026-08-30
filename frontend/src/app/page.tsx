@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
-import ReactMarkdown from 'react-markdown';
+import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
   queryDocument,
@@ -1631,36 +1631,60 @@ export default function Home() {
                         // messages go through this: the user's own typed query
                         // should never be Markdown-interpreted (e.g. a literal
                         // "*" in their question shouldn't turn into italics).
+                        //
+                        // markdown-to-jsx instead of react-markdown: this app
+                        // only ever renders plain CommonMark (headers, bold,
+                        // lists, inline code, links) with no GFM tables,
+                        // footnotes, or raw HTML — react-markdown's
+                        // remark/rehype/unified pipeline (~35-60 KB minzipped
+                        // on its own) was mostly unused weight for that,
+                        // and it's loaded unconditionally since the very
+                        // first agent answer needs it. markdown-to-jsx covers
+                        // the same CommonMark subset at ~5-6 KB gzipped.
+                        // Lighthouse's "Reduce unused JavaScript" flag on
+                        // this app was largely this, alongside react-pdf
+                        // (already split into its own dynamically-imported
+                        // chunk in PdfPreview.tsx). One behavioral note:
+                        // markdown-to-jsx parses literal HTML found in the
+                        // input into JSX (not escaped, unlike react-markdown's
+                        // default) — it does this via its own AST rather than
+                        // dangerouslySetInnerHTML, so it isn't a raw-injection
+                        // vector, but it means any HTML-like text Gemini
+                        // happens to output would render as elements instead
+                        // of literal text. The source here is only ever
+                        // Gemini's own generated answer text, not
+                        // user-supplied HTML, so this is a low-risk trade for
+                        // the bundle-size win.
                         <div className="markdown-body break-words text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
-                          <ReactMarkdown
-                            components={{
-                              h1: (props) => <h3 className="text-base font-bold mt-3 mb-1.5" {...props} />,
-                              h2: (props) => <h3 className="text-base font-bold mt-3 mb-1.5" {...props} />,
-                              h3: (props) => <h4 className="text-sm font-bold mt-3 mb-1.5" {...props} />,
-                              p: (props) => <p className="mb-2 whitespace-pre-wrap" {...props} />,
-                              ul: (props) => <ul className="list-disc pl-5 mb-2 space-y-0.5" {...props} />,
-                              ol: (props) => <ol className="list-decimal pl-5 mb-2 space-y-0.5" {...props} />,
-                              li: (props) => <li className="pl-0.5" {...props} />,
-                              strong: (props) => <strong className="font-semibold" {...props} />,
-                              code: (props) => (
-                                <code
-                                  className="bg-slate-100 dark:bg-slate-800 rounded px-1 py-0.5 text-xs font-mono"
-                                  {...props}
-                                />
-                              ),
-                              hr: () => <hr className="my-3 border-slate-200 dark:border-slate-700" />,
-                              a: (props) => (
-                                <a
-                                  className="text-indigo-600 dark:text-indigo-400 underline"
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  {...props}
-                                />
-                              ),
+                          <Markdown
+                            options={{
+                              overrides: {
+                                h1: { component: 'h3', props: { className: 'text-base font-bold mt-3 mb-1.5' } },
+                                h2: { component: 'h3', props: { className: 'text-base font-bold mt-3 mb-1.5' } },
+                                h3: { component: 'h4', props: { className: 'text-sm font-bold mt-3 mb-1.5' } },
+                                p: { props: { className: 'mb-2 whitespace-pre-wrap' } },
+                                ul: { props: { className: 'list-disc pl-5 mb-2 space-y-0.5' } },
+                                ol: { props: { className: 'list-decimal pl-5 mb-2 space-y-0.5' } },
+                                li: { props: { className: 'pl-0.5' } },
+                                strong: { props: { className: 'font-semibold' } },
+                                code: {
+                                  props: {
+                                    className: 'bg-slate-100 dark:bg-slate-800 rounded px-1 py-0.5 text-xs font-mono',
+                                  },
+                                },
+                                hr: { props: { className: 'my-3 border-slate-200 dark:border-slate-700' } },
+                                a: {
+                                  props: {
+                                    className: 'text-indigo-600 dark:text-indigo-400 underline',
+                                    target: '_blank',
+                                    rel: 'noopener noreferrer',
+                                  },
+                                },
+                              },
                             }}
                           >
                             {msg.text}
-                          </ReactMarkdown>
+                          </Markdown>
                         </div>
                       )}
 
