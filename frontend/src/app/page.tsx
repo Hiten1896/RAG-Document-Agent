@@ -38,6 +38,12 @@ import {
   RefreshCw,
   Copy,
   Check,
+  ClipboardList,
+  ShieldAlert,
+  ListChecks,
+  GitCompareArrows,
+  Download,
+  BookmarkCheck,
 } from 'lucide-react';
 
 // react-pdf renders PDFs itself via pdf.js instead of relying on the
@@ -103,6 +109,13 @@ interface Conversation {
   titleGenerated?: boolean;
 }
 
+interface SavedArtifact {
+  id: string;
+  title: string;
+  text: string;
+  createdAt: string;
+}
+
 // Session-only: kept in memory for the tab's lifetime, not persisted to
 // localStorage/sessionStorage, so a reload starts fresh by design.
 function makeConversationId(): string {
@@ -134,6 +147,37 @@ const SUPPORTED_UPLOAD_ACCEPT = [
   'application/pdf',
   ...SUPPORTED_UPLOAD_EXTENSIONS,
 ].join(',');
+
+const ANALYSIS_PRESETS = [
+  {
+    label: 'Executive summary',
+    hint: 'The main ideas and conclusions',
+    prompt:
+      'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
+    icon: ClipboardList,
+  },
+  {
+    label: 'Key risks',
+    hint: 'Issues, caveats, and exposure',
+    prompt:
+      'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
+    icon: ShieldAlert,
+  },
+  {
+    label: 'Action items',
+    hint: 'Tasks, owners, and deadlines',
+    prompt:
+      'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
+    icon: ListChecks,
+  },
+  {
+    label: 'Compare documents',
+    hint: 'Agreements and differences',
+    prompt:
+      'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
+    icon: GitCompareArrows,
+  },
+];
 
 
 /* ───── Brand mark ─────
@@ -1004,11 +1048,12 @@ export default function Home() {
   };
 
   /* Query */
-  const handleSendQuery = async (e?: React.FormEvent) => {
+  const handleSendQuery = async (e?: React.FormEvent, presetQuery?: string) => {
     if (e) e.preventDefault();
-    if (!query.trim() || loading) return;
+    const requestedQuery = presetQuery ?? query;
+    if (!requestedQuery.trim() || loading) return;
 
-    const userText = query.trim();
+    const userText = requestedQuery.trim();
     const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
     // Captured before the async gap below — the active conversation could
     // change while this request is in flight, and the backend filters
@@ -1147,6 +1192,54 @@ export default function Home() {
      the button icon to a checkmark for feedback, the same pattern Claude's
      own UI uses. `copiedIndex` is cleared automatically after a short delay. */
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [savedArtifacts, setSavedArtifacts] = useState<SavedArtifact[]>([]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem('docagent_artifacts');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) setSavedArtifacts(parsed);
+      }
+    } catch {
+      // Local storage is optional; the download action still works without it.
+    }
+  }, []);
+
+  const handleSaveArtifact = (index: number, message: Message) => {
+    if (message.sender !== 'agent') return;
+    const title = `Document brief ${new Date().toLocaleDateString()}`;
+    const sourceLines = (message.sources ?? []).map((source) => {
+      const location = source.page ? `page ${source.page}` : source.location || 'document';
+      return `- ${source.source || 'Document'} (${location})`;
+    });
+    const markdown = `# ${title}\n\n${message.text}${sourceLines.length ? `\n\n## Sources\n\n${sourceLines.join('\n')}` : ''}\n`;
+    const artifact: SavedArtifact = {
+      id: `${Date.now()}_${index}`,
+      title,
+      text: markdown,
+      createdAt: new Date().toISOString(),
+    };
+    const next = [artifact, ...savedArtifacts].slice(0, 12);
+    setSavedArtifacts(next);
+    try {
+      window.localStorage.setItem('docagent_artifacts', JSON.stringify(next));
+    } catch {
+      // Quota or private-browsing failures should not block the download.
+    }
+    downloadArtifact(artifact);
+  };
+
+  const downloadArtifact = (artifact: SavedArtifact) => {
+    const blob = new Blob([artifact.text], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${artifact.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleCopy = async (index: number, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -1241,6 +1334,7 @@ export default function Home() {
   };
 
   const isEmptyChat = messages.length === 0;
+  const hasIndexedDocuments = ingestedFiles.some((file) => file.status === 'completed');
 
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
@@ -1436,6 +1530,31 @@ export default function Home() {
           </div>
         </div>
 
+        {savedArtifacts.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800/80 min-w-[260px] shrink-0">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Artifacts
+              </label>
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">{savedArtifacts.length}</span>
+            </div>
+            <div className="space-y-1 max-h-24 overflow-y-auto">
+              {savedArtifacts.slice(0, 3).map((artifact) => (
+                <button
+                  key={artifact.id}
+                  type="button"
+                  onClick={() => downloadArtifact(artifact)}
+                  className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition cursor-pointer"
+                  title="Download Markdown brief"
+                >
+                  <Download className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                  <span className="truncate">{artifact.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Backend Status Footer */}
         <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px] shrink-0">
           <span>Backend Pipeline:</span>
@@ -1536,6 +1655,34 @@ export default function Home() {
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
                 {greetingSubtext}
               </p>
+              <div className="w-full max-w-2xl px-4 mb-5 text-left">
+                <div className="flex items-center justify-between mb-2 px-1">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                    Start with an analysis
+                  </span>
+                  {!hasIndexedDocuments && (
+                    <span className="text-[11px] text-slate-400 dark:text-slate-600">Upload a document first</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                  {ANALYSIS_PRESETS.map((preset) => {
+                    const Icon = preset.icon;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={!hasIndexedDocuments || loading}
+                        onClick={() => void handleSendQuery(undefined, preset.prompt)}
+                        className="min-h-[88px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 px-3 py-3 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mb-2" />
+                        <span className="block text-xs font-semibold text-slate-800 dark:text-slate-200">{preset.label}</span>
+                        <span className="block mt-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500">{preset.hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="w-full max-w-2xl px-4">
                 <ChatComposer
                   query={query}
@@ -1782,6 +1929,18 @@ export default function Home() {
                           aria-label="Edit"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      {!isUser && (
+                        <button
+                          type="button"
+                          onClick={() => handleSaveArtifact(index, msg)}
+                          className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                          title="Save as Markdown brief"
+                          aria-label="Save as Markdown brief"
+                        >
+                          <BookmarkCheck className="w-3.5 h-3.5" />
                         </button>
                       )}
 
