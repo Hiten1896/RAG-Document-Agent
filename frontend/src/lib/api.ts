@@ -24,6 +24,22 @@ export interface QueryResponse {
   query?: string;
   answer: string;
   sources: SourceMetadata[];
+  debug?: QueryDebug;
+}
+
+export interface QueryDebugChunk {
+  text: string;
+  source?: string;
+  page?: number;
+  location?: string;
+  relevance_score?: number;
+}
+
+export interface QueryDebug {
+  chunks: QueryDebugChunk[];
+  prompt: string;
+  top_k: number;
+  retrieved_count: number;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
@@ -160,6 +176,7 @@ export async function queryDocument(
   query: string,
   chatId?: string,
   top_k: number = 4,
+  debug = false,
 ): Promise<QueryResponse> {
   let response: Response;
   try {
@@ -168,6 +185,7 @@ export async function queryDocument(
       headers: {
         'Content-Type': 'application/json',
         ...sessionHeaders(chatId),
+        ...(debug ? { 'X-Debug': 'true' } : {}),
       },
       body: JSON.stringify({ query, top_k }),
       signal: timeoutSignal(QUERY_TIMEOUT_MS),
@@ -181,7 +199,17 @@ export async function queryDocument(
   }
 
   const data: QueryResponse = await response.json();
-  return { ...data, sources: Array.isArray(data.sources) ? data.sources : [] };
+  return {
+    ...data,
+    sources: Array.isArray(data.sources) ? data.sources : [],
+    debug:
+      data.debug && Array.isArray(data.debug.chunks)
+        ? {
+            ...data.debug,
+            chunks: data.debug.chunks,
+          }
+        : undefined,
+  };
 }
 
 /**

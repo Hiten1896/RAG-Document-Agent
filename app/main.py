@@ -613,6 +613,7 @@ async def query_document(
     payload: QueryRequest,
     x_session_id: Optional[str] = Header(default="default_session"),
     x_chat_id: Optional[str] = Header(default="default_chat"),
+    x_debug: bool = Header(default=False),
 ):
     question = payload.query.strip()
     if not question:
@@ -685,7 +686,25 @@ async def query_document(
             status_code=500, detail=f"Failed to generate answer: {exc}"
         ) from exc
 
-    return {"query": question, "answer": answer, "sources": sources}
+    result = {"query": question, "answer": answer, "sources": sources}
+    if x_debug:
+        result["debug"] = {
+            "chunks": [
+                {
+                    "text": doc.page_content,
+                    "source": doc.metadata.get("file_name"),
+                    "page": doc.metadata.get("page"),
+                    "location": doc.metadata.get("location"),
+                    "relevance_score": round(float(score), 4),
+                }
+                for doc, score in scored
+            ],
+            "prompt": prompt,
+            "top_k": RETRIEVAL_K,
+            "retrieved_count": len(scored),
+        }
+
+    return result
 
 
 @app.delete("/api/session/clear")

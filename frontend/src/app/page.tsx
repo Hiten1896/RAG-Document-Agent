@@ -8,6 +8,7 @@ import {
   queryDocument,
   clearSession,
   SourceMetadata,
+  QueryDebug,
 } from '@/lib/api';
 import {
   Send,
@@ -87,6 +88,7 @@ interface Message {
   sender: 'user' | 'agent';
   text: string;
   sources?: SourceMetadata[];
+  debug?: QueryDebug;
   attachedFiles?: string[];
 }
 
@@ -633,6 +635,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+  const [openEvidence, setOpenEvidence] = useState<Set<string>>(new Set());
 
   /* UI state */
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -1072,10 +1075,15 @@ export default function Home() {
     try {
       // No `source` filter is passed, so the backend searches across every
       // ingested document's chunks rather than restricting to one file.
-      const res = await queryDocument(userText, targetConversationId);
+      const res = await queryDocument(userText, targetConversationId, 4, true);
       setMessagesForActive((prev) => [
         ...prev,
-        { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+        {
+          sender: 'agent',
+          text: res.answer || 'No answer returned.',
+          sources: res.sources || [],
+          debug: res.debug,
+        },
       ]);
     } catch (err: unknown) {
       const message = getErrorMessage(err, 'Unknown error');
@@ -1133,10 +1141,15 @@ export default function Home() {
 
     setLoading(true);
     try {
-      const res = await queryDocument(updatedQuery, targetConversationId);
+      const res = await queryDocument(updatedQuery, targetConversationId, 4, true);
       setMessagesForActive((prev) => [
         ...prev,
-        { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+        {
+          sender: 'agent',
+          text: res.answer || 'No answer returned.',
+          sources: res.sources || [],
+          debug: res.debug,
+        },
       ]);
     } catch (err: unknown) {
       const message = getErrorMessage(err, 'Unknown error');
@@ -1172,10 +1185,15 @@ export default function Home() {
 
     setLoading(true);
     try {
-      const res = await queryDocument(retryQuery, targetConversationId);
+      const res = await queryDocument(retryQuery, targetConversationId, 4, true);
       setMessagesForActive((prev) => [
         ...prev,
-        { sender: 'agent', text: res.answer || 'No answer returned.', sources: res.sources || [] },
+        {
+          sender: 'agent',
+          text: res.answer || 'No answer returned.',
+          sources: res.sources || [],
+          debug: res.debug,
+        },
       ]);
     } catch (err: unknown) {
       const message = getErrorMessage(err, 'Unknown error');
@@ -1712,6 +1730,8 @@ export default function Home() {
             const isUser = msg.sender === 'user';
             const isEditing = editingIndex === index;
             const dedupedSources = getDeduplicatedSources(msg.sources);
+            const evidenceKey = `${activeConversationId}:${index}`;
+            const evidenceIsOpen = openEvidence.has(evidenceKey);
 
             return (
               <div
@@ -1891,6 +1911,69 @@ export default function Home() {
                               );
                             })}
                           </div>
+                        </div>
+                      )}
+
+                      {!isUser && msg.debug && (
+                        <div className="mt-3.5 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-xs">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenEvidence((previous) => {
+                                const next = new Set(previous);
+                                if (next.has(evidenceKey)) {
+                                  next.delete(evidenceKey);
+                                } else {
+                                  next.add(evidenceKey);
+                                }
+                                return next;
+                              })
+                            }
+                            className="inline-flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400 font-medium hover:text-indigo-700 dark:hover:text-indigo-300 transition cursor-pointer"
+                            aria-expanded={evidenceIsOpen}
+                          >
+                            <Search className="w-3.5 h-3.5" />
+                            {evidenceIsOpen ? 'Hide evidence' : 'Show evidence'}
+                            <span className="text-slate-500 dark:text-slate-400 font-normal">
+                              ({msg.debug.retrieved_count} {msg.debug.retrieved_count === 1 ? 'chunk' : 'chunks'})
+                            </span>
+                          </button>
+
+                          {evidenceIsOpen && (
+                            <div className="mt-2.5 space-y-2">
+                              {msg.debug.chunks.length === 0 ? (
+                                <p className="text-slate-500 dark:text-slate-400">
+                                  No document chunks were retrieved.
+                                </p>
+                              ) : (
+                                msg.debug.chunks.map((chunk, chunkIndex) => {
+                                  const location = chunk.page
+                                    ? `Page ${chunk.page}`
+                                    : chunk.location || 'Document';
+                                  return (
+                                    <div
+                                      key={`${chunk.source || 'document'}-${chunkIndex}`}
+                                      className="rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/80 p-2.5"
+                                    >
+                                      <div className="flex items-start justify-between gap-3 mb-1.5">
+                                        <span className="font-medium text-slate-700 dark:text-slate-300 truncate">
+                                          {chunk.source || 'Document'} · {location}
+                                        </span>
+                                        {typeof chunk.relevance_score === 'number' && (
+                                          <span className="shrink-0 font-mono text-[10px] text-indigo-600 dark:text-indigo-300">
+                                            score {chunk.relevance_score.toFixed(4)}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <p className="whitespace-pre-wrap break-words text-slate-600 dark:text-slate-400">
+                                        {chunk.text}
+                                      </p>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
