@@ -1357,12 +1357,11 @@ export default function Home() {
       normalizedAnswer.matchAll(/\b(?:page|p\.|slide|sheet)\s*([a-z0-9-]+)/g),
     ).map((match) => match[1]);
     return getDeduplicatedSources(sources).filter((source) => {
-      const sourceName = (source.source || '').toLowerCase();
       const page = source.page ? String(source.page) : '';
-      return (
-        (sourceName && normalizedAnswer.includes(sourceName)) ||
-        (page && pageCitations.includes(page))
-      );
+      if (page && pageCitations.includes(page)) return true;
+      if (page) return false;
+      const sourceName = (source.source || '').toLowerCase();
+      return Boolean(sourceName && normalizedAnswer.includes(sourceName));
     });
   };
 
