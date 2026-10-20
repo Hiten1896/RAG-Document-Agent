@@ -46,8 +46,12 @@ export interface QueryDebug {
     provider: string;
     model: string;
     status: string;
+    ms?: number;
   }>;
   dropped_chunks?: number;
+  embed_ms?: number;
+  retrieve_ms?: number;
+  total_ms?: number;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';

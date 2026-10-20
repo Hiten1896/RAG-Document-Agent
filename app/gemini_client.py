@@ -13,10 +13,17 @@ logger = logging.getLogger("docagent.llm")
 
 
 class GeminiExhaustedError(RuntimeError):
-    def __init__(self, message: str, kind: str, last_error: Optional[Exception] = None):
+    def __init__(
+        self,
+        message: str,
+        kind: str,
+        last_error: Optional[Exception] = None,
+        attempts: Optional[List[Dict[str, Any]]] = None,
+    ):
         super().__init__(message)
         self.kind = kind
         self.last_error = last_error
+        self.attempts = attempts or []
 
 
 class ProviderUnavailableError(RuntimeError):
@@ -28,7 +35,7 @@ class LLMResult:
     response: Any
     provider: str
     model: str
-    attempts: List[Dict[str, str]]
+    attempts: List[Dict[str, Any]]
 
 
 def _parse_csv_env(value: Optional[str]) -> List[str]:
@@ -105,6 +112,8 @@ class GeminiClient:
                 google_api_key=key,
                 temperature=self.temperature,
                 max_tokens=self.max_output_tokens,
+                timeout=15,
+                max_retries=0,
             )
             self._clients[cache_key] = client
         return client
@@ -117,21 +126,37 @@ class GeminiClient:
         for model in self.models:
             for offset in range(len(self.api_keys)):
                 key_index = (start_key_index + offset) % len(self.api_keys)
+                started = time.perf_counter()
                 try:
                     response = self._client_for(model, self.api_keys[key_index]).invoke(prompt)
-                    attempts.append({"provider": "gemini", "model": model, "status": "success"})
+                    attempts.append(
+                        {
+                            "provider": "gemini",
+                            "model": model,
+                            "status": "success",
+                            "ms": round((time.perf_counter() - started) * 1000),
+                        }
+                    )
                     self._current_key_index = key_index
                     return LLMResult(response, "gemini", model, attempts)
                 except Exception as exc:
                     last_error = exc
                     last_kind = self._classify(str(exc))
-                    attempts.append({"provider": "gemini", "model": model, "status": last_kind})
+                    attempts.append(
+                        {
+                            "provider": "gemini",
+                            "model": model,
+                            "status": last_kind,
+                            "ms": round((time.perf_counter() - started) * 1000),
+                        }
+                    )
                     # A model/key gets one call per request; routing decides fallback.
                     continue
         raise GeminiExhaustedError(
             "All Gemini models/keys exhausted.",
             kind=last_kind,
             last_error=last_error,
+            attempts=attempts,
         )
 
 
@@ -141,13 +166,14 @@ class GroqClient:
     def __init__(self, api_key: str, model: Optional[str], temperature: float = 0.2):
         self.api_key = api_key
         self.temperature = temperature
+        self._session = requests.Session()
         self.model = model or self._discover_model()
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
     def _discover_model(self) -> str:
-        response = requests.get(
+        response = self._session.get(
             f"{self.base_url}/models",
             headers=self._headers(),
             timeout=30,
@@ -177,16 +203,19 @@ class GroqClient:
         return candidates[0]
 
     def invoke(self, prompt: str) -> LLMResult:
-        response = requests.post(
+        started = time.perf_counter()
+        response = self._session.post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
             json={
                 "model": self.model,
                 "temperature": self.temperature,
                 "tools": [],
+                "max_tokens": 600,
+                "reasoning_format": "hidden",
                 "messages": [{"role": "user", "content": prompt}],
             },
-            timeout=120,
+            timeout=15,
         )
         if response.status_code in {401, 403}:
             raise ProviderUnavailableError("Groq authentication failed.")
@@ -199,7 +228,14 @@ class GroqClient:
             response.json()["choices"][0]["message"]["content"],
             "groq",
             self.model,
-            [{"provider": "groq", "model": self.model, "status": "success"}],
+            [
+                {
+                    "provider": "groq",
+                    "model": self.model,
+                    "status": "success",
+                    "ms": round((time.perf_counter() - started) * 1000),
+                }
+            ],
         )
 
 
@@ -238,7 +274,7 @@ class LLMClient:
         forced_provider: Optional[str] = None,
     ) -> LLMResult:
         providers = [forced_provider] if forced_provider else self.provider_order
-        attempts: List[Dict[str, str]] = []
+        attempts: List[Dict[str, Any]] = []
         last_error: Optional[Exception] = None
         for provider in providers:
             client = self._provider_client(provider)
@@ -247,21 +283,30 @@ class LLMClient:
             if self._disabled_until.get(provider, 0) > time.monotonic():
                 continue
             model = getattr(client, "model", "configured")
+            attempt_started = time.perf_counter()
             try:
                 result = client.invoke(groq_prompt if provider == "groq" and groq_prompt else prompt)
                 result.attempts = attempts + result.attempts
                 return result
             except GeminiExhaustedError as exc:
                 last_error = exc
-                attempts.extend([{"provider": provider, "model": model, "status": "exhausted"}])
+                attempts.extend(exc.attempts)
                 if exc.kind == "quota":
                     self._disabled_until[provider] = time.monotonic() + 600
+                    break
                 elif exc.kind == "auth":
                     self._disabled_until_restart.add(provider)
             except (ProviderUnavailableError, requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
                 status = "429" if "rate limit" in str(exc).lower() else "unavailable"
-                attempts.append({"provider": provider, "model": model, "status": status})
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "status": status,
+                        "ms": round((time.perf_counter() - attempt_started) * 1000),
+                    }
+                )
                 if status == "429":
                     self._disabled_until[provider] = time.monotonic() + 600
                 elif "authentication" in str(exc).lower():

@@ -1351,6 +1351,23 @@ export default function Home() {
     return result;
   };
 
+  const getCitedSources = (answer: string, sources: SourceMetadata[] = []) => {
+    const normalizedAnswer = answer.toLowerCase();
+    const pageCitations = Array.from(
+      normalizedAnswer.matchAll(/\b(?:page|p\.|slide|sheet)\s*([a-z0-9-]+)/g),
+    ).map((match) => match[1]);
+    return getDeduplicatedSources(sources).filter((source) => {
+      const page = source.page ? String(source.page) : '';
+      if (page && pageCitations.includes(page)) return true;
+      if (page) return false;
+      const sourceName = (source.source || '').toLowerCase();
+      return Boolean(sourceName && normalizedAnswer.includes(sourceName));
+    });
+  };
+
+  const formatSeconds = (milliseconds?: number) =>
+    `${((milliseconds || 0) / 1000).toFixed(1)}s`;
+
   const isEmptyChat = messages.length === 0;
   const hasIndexedDocuments = ingestedFiles.some((file) => file.status === 'completed');
 
@@ -1729,7 +1746,7 @@ export default function Home() {
           {messages.map((msg, index) => {
             const isUser = msg.sender === 'user';
             const isEditing = editingIndex === index;
-            const dedupedSources = getDeduplicatedSources(msg.sources);
+            const citedSources = getCitedSources(msg.text, msg.sources);
             const evidenceKey = `${activeConversationId}:${index}`;
             const evidenceIsOpen = openEvidence.has(evidenceKey);
 
@@ -1866,18 +1883,22 @@ export default function Home() {
                       )}
 
                       {/* Source Citations */}
-                      {!isUser && dedupedSources.length > 0 && (
+                      {!isUser && (
                         <div className="mt-3.5 pt-3 border-t border-slate-100 dark:border-slate-800/80 text-xs">
                           <div className="font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
-                            <span>Retrieved Sources:</span>
+                            <span>Sources cited in this answer</span>
                             <span className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
-                              ({dedupedSources.length} distinct{' '}
-                              {dedupedSources.length === 1 ? 'citation' : 'citations'})
+                              ({citedSources.length})
                             </span>
                           </div>
 
-                          <div className="flex flex-wrap gap-1.5">
-                            {dedupedSources.map((src, srcIndex) => {
+                          {citedSources.length === 0 ? (
+                            <p className="text-slate-500 dark:text-slate-400">
+                              No supporting passages cited
+                            </p>
+                          ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                            {citedSources.map((src, srcIndex) => {
                               const isVisual = src.chunk_type === 'visual';
                               const pageText = src.page ? `Page ${src.page}` : '';
                               const sourceName = src.source || 'Document';
@@ -1910,7 +1931,8 @@ export default function Home() {
                                 </button>
                               );
                             })}
-                          </div>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -1935,7 +1957,7 @@ export default function Home() {
                             <Search className="w-3.5 h-3.5" />
                             {evidenceIsOpen ? 'Hide evidence' : 'Show evidence'}
                             <span className="text-slate-500 dark:text-slate-400 font-normal">
-                              ({msg.debug.retrieved_count} {msg.debug.retrieved_count === 1 ? 'chunk' : 'chunks'})
+                              (Cited: {citedSources.length} - Retrieved: {msg.debug.retrieved_count})
                             </span>
                           </button>
 
@@ -1946,6 +1968,22 @@ export default function Home() {
                                   Answered by {msg.debug.provider} / {msg.debug.model}
                                 </p>
                               )}
+                              {typeof msg.debug.total_ms === 'number' && (
+                                <p className="text-slate-500 dark:text-slate-400">
+                                  Timing: Embed {formatSeconds(msg.debug.embed_ms)} - Retrieve{' '}
+                                  {formatSeconds(msg.debug.retrieve_ms)} -{' '}
+                                  {msg.debug.attempts?.map((attempt, attemptIndex) => (
+                                    <span key={`${attempt.provider}-${attemptIndex}`}>
+                                      {attemptIndex > 0 ? ' -> ' : ''}
+                                      {attempt.provider} {formatSeconds(attempt.ms)} ({attempt.status})
+                                    </span>
+                                  ))}{' '}
+                                  - Total {formatSeconds(msg.debug.total_ms)}
+                                </p>
+                              )}
+                              <p className="font-semibold text-slate-700 dark:text-slate-300">
+                                Retrieved evidence (top-k, for transparency)
+                              </p>
                               {msg.debug.chunks.length === 0 ? (
                                 <p className="text-slate-500 dark:text-slate-400">
                                   No document chunks were retrieved.
@@ -1958,12 +1996,31 @@ export default function Home() {
                                   return (
                                     <div
                                       key={`${chunk.source || 'document'}-${chunkIndex}`}
-                                      className="rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/80 p-2.5"
+                                      className={`rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/80 p-2.5 ${
+                                        citedSources.some(
+                                          (source) =>
+                                            source.source === chunk.source &&
+                                            source.page === chunk.page &&
+                                            source.location === chunk.location,
+                                        )
+                                          ? ''
+                                          : 'opacity-50'
+                                      }`}
                                     >
                                       <div className="flex items-start justify-between gap-3 mb-1.5">
                                         <span className="font-medium text-slate-700 dark:text-slate-300 truncate">
                                           {chunk.source || 'Document'} · {location}
                                         </span>
+                                        {citedSources.some(
+                                          (source) =>
+                                            source.source === chunk.source &&
+                                            source.page === chunk.page &&
+                                            source.location === chunk.location,
+                                        ) && (
+                                          <span className="shrink-0 rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-300">
+                                            Cited
+                                          </span>
+                                        )}
                                         {typeof chunk.relevance_score === 'number' && (
                                           <span className="shrink-0 font-mono text-[10px] text-indigo-600 dark:text-indigo-300">
                                             score {chunk.relevance_score.toFixed(4)}
