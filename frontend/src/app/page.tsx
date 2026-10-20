@@ -1941,6 +1941,11 @@ export default function Home() {
 
                           {evidenceIsOpen && (
                             <div className="mt-2.5 space-y-2">
+                              {msg.debug.provider && msg.debug.model && (
+                                <p className="text-slate-500 dark:text-slate-400">
+                                  Answered by {msg.debug.provider} / {msg.debug.model}
+                                </p>
+                              )}
                               {msg.debug.chunks.length === 0 ? (
                                 <p className="text-slate-500 dark:text-slate-400">
                                   No document chunks were retrieved.

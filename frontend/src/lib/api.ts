@@ -40,6 +40,14 @@ export interface QueryDebug {
   prompt: string;
   top_k: number;
   retrieved_count: number;
+  provider?: string;
+  model?: string;
+  attempts?: Array<{
+    provider: string;
+    model: string;
+    status: string;
+  }>;
+  dropped_chunks?: number;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';

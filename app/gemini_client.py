@@ -4,11 +4,12 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import requests
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-logger = logging.getLogger("docagent.gemini")
+logger = logging.getLogger("docagent.llm")
 
 
 class GeminiExhaustedError(RuntimeError):
@@ -16,6 +17,18 @@ class GeminiExhaustedError(RuntimeError):
         super().__init__(message)
         self.kind = kind
         self.last_error = last_error
+
+
+class ProviderUnavailableError(RuntimeError):
+    pass
+
+
+@dataclass
+class LLMResult:
+    response: Any
+    provider: str
+    model: str
+    attempts: List[Dict[str, str]]
 
 
 def _parse_csv_env(value: Optional[str]) -> List[str]:
@@ -26,9 +39,9 @@ def _parse_csv_env(value: Optional[str]) -> List[str]:
 
 def _load_api_keys() -> List[str]:
     keys: List[str] = []
-    for k in _parse_csv_env(os.getenv("GEMINI_API_KEYS")):
-        if k not in keys:
-            keys.append(k)
+    for key in _parse_csv_env(os.getenv("GEMINI_API_KEYS")):
+        if key not in keys:
+            keys.append(key)
     for single in (os.getenv("GEMINI_API_KEY"), os.getenv("GOOGLE_API_KEY")):
         if single and single not in keys:
             keys.append(single)
@@ -40,33 +53,16 @@ def _load_models() -> List[str]:
     single = os.getenv("LLM_MODEL")
     if single:
         models.append(single)
-    for m in _parse_csv_env(os.getenv("LLM_MODELS")):
-        if m not in models:
-            models.append(m)
-    if not models:
-        # `gemini-2.5-flash` and `gemini-1.5-flash` used to be the defaults and
-        # both now 404 for newly issued API keys ("no longer available to new
-        # users"), which took /api/query down with a 503 on every request.
-        #
-        # `gemini-3.5-flash` (used here previously) does not exist as a model
-        # id at all — every call to it 404'd immediately, so the first model
-        # in the list was dead on arrival and every request paid the cost of
-        # falling through to the second entry.
-        #
-        # Order matters more than it looks: the google-genai SDK retries a 429
-        # internally with backoff for ~35s before raising, so a first entry that
-        # is out of quota adds that delay to every single answer. A concrete,
-        # verified, currently-GA model goes first; the floating "latest" alias
-        # is the fallback that keeps this from rotting again as Google renames
-        # things.
-        models = ["gemini-2.5-flash", "gemini-flash-latest"]
-    return models
+    for model in _parse_csv_env(os.getenv("LLM_MODELS")):
+        if model not in models:
+            models.append(model)
+    return models or ["gemini-2.5-flash", "gemini-flash-latest"]
 
 
 class GeminiClient:
     _TRANSIENT_MARKERS = ("timeout", "timed out", "503", "unavailable", "connection")
     _QUOTA_MARKERS = ("quota", "rate limit", "429", "resource_exhausted")
-    _AUTH_MARKERS = ("api key", "unauthenticated", "permission", "invalid_argument")
+    _AUTH_MARKERS = ("api key", "unauthenticated", "permission", "invalid_argument", "403")
     _MODEL_MARKERS = ("not_found", "no longer available", "404")
 
     def __init__(
@@ -74,49 +70,29 @@ class GeminiClient:
         api_keys: Optional[List[str]] = None,
         models: Optional[List[str]] = None,
         temperature: float = 0.2,
-        max_retries_per_attempt: int = 2,
         max_output_tokens: int = 1024,
     ):
         self.api_keys = api_keys if api_keys is not None else _load_api_keys()
         self.models = models if models is not None else _load_models()
         self.temperature = temperature
-        self.max_retries_per_attempt = max_retries_per_attempt
-        # Response latency scales with how many tokens the model generates, so
-        # an unbounded max lets one verbose answer take far longer than the
-        # question needed. 1024 tokens is generous for a grounded QA answer
-        # with citations while cutting off runaway generations that were the
-        # single biggest lever on perceived "it's taking too long" latency.
-        # `max_tokens` is the constructor kwarg ChatGoogleGenerativeAI actually
-        # reads (not `max_output_tokens`, which is the raw Gemini API field
-        # name but isn't what this LangChain wrapper accepts).
         self.max_output_tokens = max_output_tokens
-
         if not self.api_keys:
             raise RuntimeError(
                 "No Gemini API key found. Set GEMINI_API_KEYS or GEMINI_API_KEY in .env"
             )
-
         self._current_key_index = 0
-        # (model, key) -> ChatGoogleGenerativeAI. Constructing this object sets
-        # up the genai SDK's own HTTP/gRPC transport, which is real, measurable
-        # overhead — previously `_client_for` built a fresh one on every single
-        # `invoke()` call (i.e. every query), so every answer paid that setup
-        # cost on top of the actual model latency. There are at most
-        # len(models) * len(api_keys) distinct combinations ever used, so
-        # caching them on the singleton means that setup happens once per
-        # combination for the life of the process instead of once per query.
-        self._clients: Dict[tuple[str, str], ChatGoogleGenerativeAI] = {}
+        self._clients: Dict[Tuple[str, str], ChatGoogleGenerativeAI] = {}
 
     @staticmethod
     def _classify(message: str) -> str:
-        m = message.lower()
-        if any(marker in m for marker in GeminiClient._QUOTA_MARKERS):
+        lowered = message.lower()
+        if any(marker in lowered for marker in GeminiClient._QUOTA_MARKERS):
             return "quota"
-        if any(marker in m for marker in GeminiClient._AUTH_MARKERS):
+        if any(marker in lowered for marker in GeminiClient._AUTH_MARKERS):
             return "auth"
-        if any(marker in m for marker in GeminiClient._MODEL_MARKERS):
+        if any(marker in lowered for marker in GeminiClient._MODEL_MARKERS):
             return "model_not_found"
-        if any(marker in m for marker in GeminiClient._TRANSIENT_MARKERS):
+        if any(marker in lowered for marker in GeminiClient._TRANSIENT_MARKERS):
             return "transient"
         return "unknown"
 
@@ -133,43 +109,161 @@ class GeminiClient:
             self._clients[cache_key] = client
         return client
 
-    def invoke(self, prompt: str):
-        last_error: Optional[Exception] = None
+    def invoke(self, prompt: str) -> LLMResult:
         last_kind = "unknown"
-        num_keys = len(self.api_keys)
+        last_error: Optional[Exception] = None
+        attempts: List[Dict[str, str]] = []
         start_key_index = self._current_key_index
-        next_start_key_index = start_key_index
-
         for model in self.models:
-            for offset in range(num_keys):
-                key_index = (start_key_index + offset) % num_keys
-                key = self.api_keys[key_index]
-                client = self._client_for(model, key)
-
-                for attempt in range(1, self.max_retries_per_attempt + 1):
-                    try:
-                        response = client.invoke(prompt)
-                        self._current_key_index = key_index
-                        return response
-                    except Exception as e:
-                        message = str(e)
-                        kind = self._classify(message)
-                        last_error = e
-
-                        if last_kind == "unknown" or kind != "transient":
-                            last_kind = kind
-
-                        if kind == "transient" and attempt < self.max_retries_per_attempt:
-                            time.sleep(2 ** (attempt - 1))
-                            continue
-
-                        if kind == "quota":
-                            next_start_key_index = (key_index + 1) % num_keys
-                        break
-
-        self._current_key_index = next_start_key_index
+            for offset in range(len(self.api_keys)):
+                key_index = (start_key_index + offset) % len(self.api_keys)
+                try:
+                    response = self._client_for(model, self.api_keys[key_index]).invoke(prompt)
+                    attempts.append({"provider": "gemini", "model": model, "status": "success"})
+                    self._current_key_index = key_index
+                    return LLMResult(response, "gemini", model, attempts)
+                except Exception as exc:
+                    last_error = exc
+                    last_kind = self._classify(str(exc))
+                    attempts.append({"provider": "gemini", "model": model, "status": last_kind})
+                    # A model/key gets one call per request; routing decides fallback.
+                    continue
         raise GeminiExhaustedError(
-            f"All Gemini models/keys exhausted. Last error: {last_error}",
+            "All Gemini models/keys exhausted.",
             kind=last_kind,
             last_error=last_error,
         )
+
+
+class GroqClient:
+    base_url = "https://api.groq.com/openai/v1"
+
+    def __init__(self, api_key: str, model: Optional[str], temperature: float = 0.2):
+        self.api_key = api_key
+        self.temperature = temperature
+        self.model = model or self._discover_model()
+
+    def _headers(self) -> Dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+    def _discover_model(self) -> str:
+        response = requests.get(
+            f"{self.base_url}/models",
+            headers=self._headers(),
+            timeout=30,
+        )
+        if response.status_code in {401, 403}:
+            raise ProviderUnavailableError("Groq authentication failed.")
+        response.raise_for_status()
+        models = response.json().get("data", [])
+        preferred_markers = ("qwen", "gpt-oss", "llama", "mixtral", "mistral", "gemma")
+        excluded_markers = (
+            "prompt-guard",
+            "safeguard",
+            "whisper",
+            "orpheus",
+            "embed",
+            "rerank",
+        )
+        candidates = [
+            item.get("id", "")
+            for item in models
+            if item.get("id")
+            and any(marker in item.get("id", "").lower() for marker in preferred_markers)
+            and not any(marker in item.get("id", "").lower() for marker in excluded_markers)
+        ]
+        if not candidates:
+            raise ProviderUnavailableError("Groq returned no general-purpose chat model.")
+        return candidates[0]
+
+    def invoke(self, prompt: str) -> LLMResult:
+        response = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json={
+                "model": self.model,
+                "temperature": self.temperature,
+                "tools": [],
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=120,
+        )
+        if response.status_code in {401, 403}:
+            raise ProviderUnavailableError("Groq authentication failed.")
+        if response.status_code == 429:
+            raise ProviderUnavailableError("Groq rate limit reached.")
+        if response.status_code >= 500:
+            raise ProviderUnavailableError("Groq service unavailable.")
+        response.raise_for_status()
+        return LLMResult(
+            response.json()["choices"][0]["message"]["content"],
+            "groq",
+            self.model,
+            [{"provider": "groq", "model": self.model, "status": "success"}],
+        )
+
+
+class LLMClient:
+    def __init__(self):
+        self.temperature = 0.2
+        self.provider_order = [
+            item.lower()
+            for item in _parse_csv_env(os.getenv("LLM_PROVIDER_ORDER", "gemini,groq"))
+            if item.lower() in {"gemini", "groq"}
+        ] or ["gemini", "groq"]
+        self.gemini: Optional[GeminiClient] = None
+        self.groq: Optional[GroqClient] = None
+        self._disabled_until: Dict[str, float] = {}
+        self._disabled_until_restart: set[str] = set()
+        if _load_api_keys():
+            self.gemini = GeminiClient()
+        groq_key = os.getenv("GROQ_API_KEY", "").strip()
+        if groq_key:
+            try:
+                self.groq = GroqClient(groq_key, os.getenv("GROQ_MODEL") or None, self.temperature)
+            except (ProviderUnavailableError, requests.RequestException) as exc:
+                logger.warning("Groq provider unavailable at startup: %s", type(exc).__name__)
+        if self.gemini is None and self.groq is None:
+            raise RuntimeError("No LLM provider is configured. Set a Gemini or Groq API key.")
+        configured = [name for name, client in (("gemini", self.gemini), ("groq", self.groq)) if client]
+        logger.info("LLM providers configured: %s", ", ".join(configured))
+
+    def _provider_client(self, provider: str):
+        return self.gemini if provider == "gemini" else self.groq
+
+    def invoke(
+        self,
+        prompt: str,
+        groq_prompt: Optional[str] = None,
+        forced_provider: Optional[str] = None,
+    ) -> LLMResult:
+        providers = [forced_provider] if forced_provider else self.provider_order
+        attempts: List[Dict[str, str]] = []
+        last_error: Optional[Exception] = None
+        for provider in providers:
+            client = self._provider_client(provider)
+            if client is None or provider in self._disabled_until_restart:
+                continue
+            if self._disabled_until.get(provider, 0) > time.monotonic():
+                continue
+            model = getattr(client, "model", "configured")
+            try:
+                result = client.invoke(groq_prompt if provider == "groq" and groq_prompt else prompt)
+                result.attempts = attempts + result.attempts
+                return result
+            except GeminiExhaustedError as exc:
+                last_error = exc
+                attempts.extend([{"provider": provider, "model": model, "status": "exhausted"}])
+                if exc.kind == "quota":
+                    self._disabled_until[provider] = time.monotonic() + 600
+                elif exc.kind == "auth":
+                    self._disabled_until_restart.add(provider)
+            except (ProviderUnavailableError, requests.Timeout, requests.ConnectionError) as exc:
+                last_error = exc
+                status = "429" if "rate limit" in str(exc).lower() else "unavailable"
+                attempts.append({"provider": provider, "model": model, "status": status})
+                if status == "429":
+                    self._disabled_until[provider] = time.monotonic() + 600
+                elif "authentication" in str(exc).lower():
+                    self._disabled_until_restart.add(provider)
+        raise ProviderUnavailableError("All configured LLM providers are unavailable.") from last_error

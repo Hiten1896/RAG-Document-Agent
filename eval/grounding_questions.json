@@ -1,0 +1,47 @@
+[
+  {
+    "question": "Who founded the Zorvania Institute and when?",
+    "type": "fake_fact",
+    "expected": ["Anita Mehra", "1987"]
+  },
+  {
+    "question": "What is the annual tuition fee?",
+    "type": "fake_fact",
+    "expected": ["42,500"]
+  },
+  {
+    "question": "Who is the director and when did they join?",
+    "type": "fake_fact",
+    "expected": ["Kavya Nambiar", "2019"]
+  },
+  {
+    "question": "How many books does the library hold?",
+    "type": "fake_fact",
+    "expected": ["18,240"]
+  },
+  {
+    "question": "What is the mascot's name?",
+    "type": "fake_fact",
+    "expected": ["Tarn"]
+  },
+  {
+    "question": "At what temperature does water boil at sea level, according to the document?",
+    "type": "contradiction",
+    "expected": ["60"]
+  },
+  {
+    "question": "What is the hostel fee?",
+    "type": "unanswerable",
+    "expected": []
+  },
+  {
+    "question": "Who won the 2011 Cricket World Cup?",
+    "type": "unanswerable",
+    "expected": []
+  },
+  {
+    "question": "What is the capital of France?",
+    "type": "unanswerable",
+    "expected": []
+  }
+]

@@ -7,13 +7,11 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install system dependencies including Tesseract OCR engine
+# Install system dependencies required by the application
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     g++ \
     curl \
-    tesseract-ocr \
-    libtesseract-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
