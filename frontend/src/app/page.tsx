@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import dynamic from 'next/dynamic';
 import Markdown from 'markdown-to-jsx';
 import {
@@ -128,6 +128,20 @@ interface SavedArtifact {
   createdAt: string;
 }
 
+interface SpeechRecognitionLike {
+  continuous: boolean;
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: { results: SpeechRecognitionResultList }) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
 // Session-only: kept in memory for the tab's lifetime, not persisted to
 // localStorage/sessionStorage, so a reload starts fresh by design.
 function makeConversationId(): string {
@@ -137,6 +151,20 @@ function makeConversationId(): string {
 function titleFromQuery(text: string): string {
   const trimmed = text.trim();
   return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
+}
+
+function subscribeToTheme(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  return () => observer.disconnect();
+}
+
+function getThemeSnapshot(): 'dark' | 'light' {
+  return document.documentElement.classList.contains('light') ? 'light' : 'dark';
+}
+
+function getServerThemeSnapshot(): 'dark' {
+  return 'dark';
 }
 
 // Formats the backend accepts. Kept next to titleFromQuery so the upload filter
@@ -218,6 +246,39 @@ const ANALYSIS_PRESETS = [
   },
 ];
 
+const GREETINGS: Record<
+  'morning' | 'afternoon' | 'evening' | 'night',
+  { headline: string; subtext: string }[]
+> = {
+  morning: [
+    { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
+    { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
+    { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
+    { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
+    { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
+  ],
+  afternoon: [
+    { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
+    { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
+    { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
+    { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
+    { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
+  ],
+  evening: [
+    { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
+    { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
+    { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
+    { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
+    { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
+  ],
+  night: [
+    { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
+    { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
+    { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
+    { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
+    { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
+  ],
+};
 
 /* ───── Brand mark ─────
    An open document with a spark of insight rising from the page — reads at
@@ -598,82 +659,33 @@ export default function Home() {
     };
   }, [viewerFile]);
 
-  /* Empty-state greeting — must NOT be computed during the initial render.
-     `new Date().getHours()` differs between the server's clock (SSR) and
-     the browser's local clock, so computing it eagerly produces two
-     different strings — the server's version flashes, then snaps to the
-     client's on hydration. Instead it starts empty and is set once in an
-     effect, which only ever runs client-side, so there's exactly one
-     render of it and no mismatch.
-
-     Four real periods (morning / afternoon / evening / night), each with
-     five headline + subtext pairs. Picked in a fixed round-robin order
-     (not random) so consecutive visits within the same period never repeat
-     the same line back-to-back — the next index per period is remembered
-     in localStorage across reloads/sessions. */
-  const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
-    morning: [
-      { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
-      { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
-      { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
-      { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
-      { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
-    ],
-    afternoon: [
-      { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
-      { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
-      { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
-      { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
-      { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
-    ],
-    evening: [
-      { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
-      { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
-      { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
-      { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
-      { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
-    ],
-    night: [
-      { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
-      { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
-      { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
-      { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
-      { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
-    ],
-  };
-
   const [greeting, setGreeting] = useState('');
   const [greetingSubtext, setGreetingSubtext] = useState(
     'Add a document to get started, or ask me about something you\u2019ve already shared.'
   );
 
   useEffect(() => {
-    const hour = new Date().getHours();
-    // morning 4–12, afternoon 12–16, evening 16–20, night 20–4 (wraps past midnight)
-    const period: keyof typeof GREETINGS =
-      hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
-    const pool = GREETINGS[period];
+    const frame = window.requestAnimationFrame(() => {
+      const hour = new Date().getHours();
+      const period: keyof typeof GREETINGS =
+        hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
+      const pool = GREETINGS[period];
+      const storageKey = `docagent_greeting_idx_${period}`;
+      let nextIndex = 0;
+      try {
+        const stored = window.localStorage.getItem(storageKey);
+        const parsed = stored !== null ? parseInt(stored, 10) : -1;
+        nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
+        window.localStorage.setItem(storageKey, String(nextIndex));
+      } catch {
+        nextIndex = 0;
+      }
 
-    // Sequential, not random: read the last-used index for this period from
-    // localStorage, advance it by one (wrapping around), and persist it —
-    // so the very next visit during the same period is guaranteed to be a
-    // different line, cycling through all five before any repeat.
-    const storageKey = `docagent_greeting_idx_${period}`;
-    let nextIndex = 0;
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      const parsed = stored !== null ? parseInt(stored, 10) : -1;
-      nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
-      window.localStorage.setItem(storageKey, String(nextIndex));
-    } catch {
-      // localStorage unavailable (private browsing, etc.) — fall back to
-      // the first line in the period rather than breaking the greeting.
-      nextIndex = 0;
-    }
-
-    const pick = pool[nextIndex];
-    setGreeting(pick.headline);
-    setGreetingSubtext(pick.subtext);
+      const pick = pool[nextIndex];
+      setGreeting(pick.headline);
+      setGreetingSubtext(pick.subtext);
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   useEffect(() => {
@@ -788,7 +800,11 @@ export default function Home() {
   }, [closeFileViewer]);
 
   /* Theme state */
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const theme = useSyncExternalStore(
+    subscribeToTheme,
+    getThemeSnapshot,
+    getServerThemeSnapshot
+  );
 
   const applyTheme = (targetTheme: 'dark' | 'light') => {
     const root = document.documentElement;
@@ -803,15 +819,6 @@ export default function Home() {
     }
   };
 
-  // The inline script in layout.tsx already put the right class on <html> before
-  // first paint. This only syncs React state to that, so the toggle icon matches
-  // what's on screen — it must not re-derive or re-apply the theme, which is
-  // what previously forced the whole app to stay `invisible` until hydration.
-  useEffect(() => {
-    const root = document.documentElement;
-    setTheme(root.classList.contains('light') ? 'light' : 'dark');
-  }, []);
-
   // The OS theme can change while the page is open. Follow it only while the
   // user has not pinned a choice of their own.
   useEffect(() => {
@@ -825,7 +832,6 @@ export default function Home() {
         // localStorage unavailable — fall through and follow the system
       }
       const next = event.matches ? 'light' : 'dark';
-      setTheme(next);
       applyTheme(next);
     };
 
@@ -839,7 +845,6 @@ export default function Home() {
       e.stopPropagation();
     }
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(nextTheme);
     applyTheme(nextTheme);
 
     try {
@@ -852,7 +857,7 @@ export default function Home() {
   /* Voice search setup */
   const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   useEffect(() => {
     return () => {
@@ -879,8 +884,12 @@ export default function Home() {
     }
 
     if (typeof window === 'undefined') return;
+    const speechWindow = window as Window & {
+      SpeechRecognition?: SpeechRecognitionConstructor;
+      webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    };
     const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
 
     if (!SpeechRecognitionCtor) {
       setMicError('Voice search is not supported in this browser.');
@@ -905,8 +914,8 @@ export default function Home() {
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
 
-      recognition.onresult = (event: any) => {
-        const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
+      recognition.onresult = (event) => {
+        const transcript = event.results[0]?.[0]?.transcript ?? '';
         if (transcript.trim()) {
           setQuery(transcript.trim());
         }
@@ -916,7 +925,7 @@ export default function Home() {
         setListening(false);
       };
 
-      recognition.onerror = (event: any) => {
+      recognition.onerror = (event) => {
         setListening(false);
         const code = event?.error;
         if (code === 'not-allowed' || code === 'service-not-allowed') {
@@ -1012,7 +1021,7 @@ export default function Home() {
     setDragOver(false);
   }, []);
 
-  const onDrop = useCallback(async (e: React.DragEvent) => {
+  const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
@@ -1021,12 +1030,12 @@ export default function Home() {
     if (droppedFiles.length) {
       await ingestMultiple(droppedFiles);
     }
-  }, []);
+  };
 
   /* Ingestion — fires all files off in parallel; each tracks its own status
      entry in ingestedFiles, shown as a file card (loading/success/failed),
      so one file failing doesn't hide another's progress or overwrite its result. */
-  const ingestMultiple = async (files: File[]) => {
+  async function ingestMultiple(files: File[]) {
     // Previously filtered to `.pdf` only, so a dropped DOCX/PPTX/XLSX was
     // discarded silently — no card, no error, nothing. The backend reads all of
     // these now, and anything outside the list gets a failed card explaining why
@@ -1063,9 +1072,9 @@ export default function Home() {
 
     setSidebarOpen(false);
     await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
-  };
+  }
 
-  const triggerAutoIngest = async (fileToIngest: File) => {
+  async function triggerAutoIngest(fileToIngest: File) {
     const name = fileToIngest.name;
 
     // Guards against a stale response overwriting a newer one for the same
@@ -1106,7 +1115,7 @@ export default function Home() {
         prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
       );
     }
-  };
+  }
 
   /* Retry — re-triggers ingestion for a failed file using the File object
      already held onto from the original upload, so the user doesn't have
@@ -1331,15 +1340,18 @@ export default function Home() {
   const [savedArtifacts, setSavedArtifacts] = useState<SavedArtifact[]>([]);
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem('docagent_artifacts');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) setSavedArtifacts(parsed);
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        const stored = window.localStorage.getItem('docagent_artifacts');
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) setSavedArtifacts(parsed);
+        }
+      } catch {
+        // Local storage is optional; the download action still works without it.
       }
-    } catch {
-      // Local storage is optional; the download action still works without it.
-    }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   const handleSaveArtifact = (index: number, message: Message) => {
@@ -1351,7 +1363,7 @@ export default function Home() {
     });
     const markdown = `# ${title}\n\n${message.text}${sourceLines.length ? `\n\n## Sources\n\n${sourceLines.join('\n')}` : ''}\n`;
     const artifact: SavedArtifact = {
-      id: `${Date.now()}_${index}`,
+      id: `${activeConversationId}_${index}_${savedArtifacts.length}`,
       title,
       text: markdown,
       createdAt: new Date().toISOString(),
