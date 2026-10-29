@@ -6,6 +6,7 @@ import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
   queryDocument,
+  generateFollowups,
   generateMindMap,
   clearSession,
   SourceMetadata,
@@ -100,6 +101,9 @@ interface Message {
   sources?: SourceMetadata[];
   debug?: QueryDebug;
   attachedFiles?: string[];
+  followups?: string[];
+  followupsLoading?: boolean;
+  followupsError?: string;
 }
 
 interface IngestedFile {
@@ -182,6 +186,7 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
 ]);
 
 const SUPPORTED_UPLOAD_LABEL = 'PDF, DOCX, PPTX, XLSX, CSV, TXT, MD';
+const REFUSAL_ANSWER = 'I could not find this in the uploaded documents.';
 
 const SUPPORTED_UPLOAD_ACCEPT = [
   'application/pdf',
@@ -1270,6 +1275,41 @@ export default function Home() {
     }
   };
 
+  const handleSuggestQuestions = async (index: number, answerText: string) => {
+    const previousQuestion = messages
+      .slice(0, index)
+      .reverse()
+      .find((message) => message.sender === 'user')?.text;
+    if (!previousQuestion) return;
+
+    const updateMessage = (changes: Partial<Message>) => {
+      setMessagesForActive((previous) => {
+        const target = previous[index];
+        if (!target || target.sender !== 'agent' || target.text !== answerText) {
+          return previous;
+        }
+        const next = [...previous];
+        next[index] = { ...target, ...changes };
+        return next;
+      });
+    };
+
+    updateMessage({ followupsLoading: true, followupsError: undefined });
+    try {
+      const result = await generateFollowups(previousQuestion, activeConversationId);
+      updateMessage({
+        followups: result.questions,
+        followupsLoading: false,
+        followupsError: undefined,
+      });
+    } catch (err: unknown) {
+      updateMessage({
+        followupsLoading: false,
+        followupsError: getErrorMessage(err, 'Could not suggest questions.'),
+      });
+    }
+  };
+
   /* Edit & Regenerate */
   const handleStartEdit = (index: number, currentText: string) => {
     setEditingIndex(index);
@@ -2268,6 +2308,47 @@ export default function Home() {
                             </div>
                           )}
                         </div>
+                      )}
+                    </div>
+                  )}
+
+                  {!isUser && index > 0 && msg.text.trim() !== REFUSAL_ANSWER && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {msg.followups ? (
+                        msg.followups.map((suggestion, suggestionIndex) => (
+                          <button
+                            key={`${index}-${suggestionIndex}`}
+                            type="button"
+                            onClick={() => void handleSendQuery(undefined, suggestion)}
+                            disabled={loading}
+                            className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-left text-xs text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-500/30 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950/70"
+                          >
+                            {suggestion}
+                          </button>
+                        ))
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleSuggestQuestions(index, msg.text)}
+                          disabled={msg.followupsLoading || loading}
+                          className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300"
+                        >
+                          {msg.followupsLoading ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <MessageSquarePlus className="h-3.5 w-3.5" />
+                          )}
+                          {msg.followupsLoading
+                            ? 'Suggesting…'
+                            : msg.followupsError
+                              ? 'Retry suggestions'
+                              : 'Suggest questions'}
+                        </button>
+                      )}
+                      {msg.followupsError && (
+                        <p role="status" className="basis-full text-xs text-rose-600 dark:text-rose-400">
+                          {msg.followupsError}
+                        </p>
                       )}
                     </div>
                   )}

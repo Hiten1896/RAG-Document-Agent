@@ -27,6 +27,20 @@ export interface QueryResponse {
   debug?: QueryDebug;
 }
 
+export interface FollowupsResponse {
+  questions: string[];
+  debug?: {
+    chunks_used: number;
+    provider: string;
+    model: string;
+    embed_ms: number;
+    retrieve_ms: number;
+    generation_ms: number;
+    total_ms: number;
+    llm_attempts: number;
+  };
+}
+
 export interface MindMapNode {
   title: string;
   source: string | null;
@@ -104,6 +118,7 @@ const API_PREFIX = '/api';
  */
 const INGEST_TIMEOUT_MS = 180_000;
 const QUERY_TIMEOUT_MS = 120_000;
+const FOLLOWUPS_TIMEOUT_MS = 60_000;
 const MINDMAP_TIMEOUT_MS = 120_000;
 const CLEAR_TIMEOUT_MS = 15_000;
 
@@ -253,6 +268,33 @@ export async function queryDocument(
           }
         : undefined,
   };
+}
+
+export async function generateFollowups(
+  question: string,
+  chatId?: string,
+): Promise<FollowupsResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}/followups`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...sessionHeaders(chatId),
+        'X-Debug': 'true',
+      },
+      body: JSON.stringify({ question }),
+      signal: timeoutSignal(FOLLOWUPS_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Suggested questions timed out. Please try again.');
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response, 'Failed to suggest follow-up questions.');
+  }
+
+  return response.json();
 }
 
 export async function generateMindMap(

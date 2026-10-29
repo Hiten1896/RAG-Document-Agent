@@ -48,11 +48,20 @@ class FakeVectorStore:
         self, embedding, k, filter
     ):
         self.search_args = (embedding, k, filter)
-        conditions = filter["$and"]
-        session_filter = conditions[0]["$and"]
-        session_id = session_filter[0]["session_id"]["$eq"]
-        chat_id = session_filter[1]["chat_id"]["$eq"]
-        file_name = conditions[1]["file_name"]["$eq"]
+        def flatten_conditions(where):
+            for key, condition in where.items():
+                if key == "$and":
+                    for child in condition:
+                        yield from flatten_conditions(child)
+                else:
+                    yield key, condition
+
+        filter_values = {
+            key: condition["$eq"] for key, condition in flatten_conditions(filter)
+        }
+        session_id = filter_values["session_id"]
+        chat_id = filter_values["chat_id"]
+        file_name = filter_values.get("file_name")
         return [
             (
                 SimpleNamespace(page_content=text, metadata=metadata),
@@ -63,7 +72,7 @@ class FakeVectorStore:
             )
             if metadata["session_id"] == session_id
             and metadata["chat_id"] == chat_id
-            and metadata["file_name"] == file_name
+            and (file_name is None or metadata["file_name"] == file_name)
         ][:k]
 
 

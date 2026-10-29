@@ -15,7 +15,10 @@
 6. Ask “What is the capital of France?” and show the exact not-found response.
 7. Point to the **Answered by provider / model** line and the retrieved chunks,
    sources, and scores in the evidence panel.
-8. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
+8. Click **Suggest questions** below an answer. Confirm three follow-up chips
+   appear, then click one to ask it as the next question. The exact not-found
+   response does not offer suggestions.
+9. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
    no-context comparison results.
 
 Uploads are held in an in-memory ChromaDB collection and are lost when the

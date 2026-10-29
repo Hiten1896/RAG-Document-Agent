@@ -58,14 +58,18 @@ prompt.
 
 - `POST /api/ingest` uploads and indexes one supported document.
 - `POST /api/query` retrieves chunks and generates an answer.
+- `POST /api/followups` generates three document-grounded follow-up questions for a prior question.
 - `POST /api/mindmap` generates a structured mind map from the active chat's documents.
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
-Use `X-Session-Id` and `X-Chat-Id` on ingest/query/mindmap. Add `X-Debug: true`
+Use `X-Session-Id` and `X-Chat-Id` on ingest/query/followups/mindmap. Add `X-Debug: true`
 to query responses to receive retrieved chunks, relevance scores, the exact
 prompt, provider/model, routing attempts, and any Groq context trimming. Mind
 map responses include provider/model, chunk count, cache status, and timings
-when requested. The frontend's Show evidence panel renders query information,
+when requested. Follow-up generation is lazy: click **Suggest questions** below
+an answer to request three questions grounded in fresh retrieval results. Its
+optional debug response includes the provider/model, retrieved chunk count, and
+timings. The frontend's Show evidence panel renders query information,
 including `Answered by provider / model`.
 Query sources carry a numeric `page` where available and a `location` label for
 slides, sheets, or unpaginated text; the frontend uses these fields for citation
