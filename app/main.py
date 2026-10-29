@@ -28,8 +28,9 @@ from typing import Annotated, Any, Dict, List, Optional, Tuple, Type
 import requests
 from chromadb import EphemeralClient
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Header, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Header, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from langchain_chroma import Chroma
 from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -429,6 +430,51 @@ class MindMapNode(BaseModel):
 class MindMapResponse(BaseModel):
     title: str
     children: List[MindMapNode] = Field(default_factory=list)
+
+
+class _ThinkTagFilter:
+    def __init__(self) -> None:
+        self.pending = ""
+        self.hidden = False
+
+    def feed(self, chunk: str) -> str:
+        self.pending += chunk
+        visible: List[str] = []
+        while self.pending:
+            lowered = self.pending.lower()
+            if self.hidden:
+                close_index = lowered.find("</think>")
+                if close_index < 0:
+                    self.pending = self.pending[-7:]
+                    break
+                self.pending = self.pending[close_index + len("</think>") :]
+                self.hidden = False
+                continue
+
+            open_index = lowered.find("<think>")
+            if open_index >= 0:
+                visible.append(self.pending[:open_index])
+                self.pending = self.pending[open_index + len("<think>") :]
+                self.hidden = True
+                continue
+
+            keep = 0
+            for length in range(1, min(len(self.pending), len("<think>") - 1) + 1):
+                if lowered.endswith("<think>"[:length]):
+                    keep = length
+            if keep:
+                visible.append(self.pending[:-keep])
+                self.pending = self.pending[-keep:]
+            else:
+                visible.append(self.pending)
+                self.pending = ""
+            break
+        return "".join(visible)
+
+    def flush(self) -> str:
+        pending = "" if self.hidden or self.pending.lower().startswith("<think") else self.pending
+        self.pending = ""
+        return pending
 
 
 # ------------------------------------------------------------------------------
@@ -971,6 +1017,251 @@ async def query_document(
         }
 
     return result
+
+
+def _sse_event(event_name: str, data: Dict[str, Any]) -> str:
+    return (
+        f"event: {event_name}\n"
+        f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    )
+
+
+@app.post("/api/query/stream")
+async def stream_query_document(
+    payload: QueryRequest,
+    request: Request,
+    x_session_id: Optional[str] = Header(default="default_session"),
+    x_chat_id: Optional[str] = Header(default="default_chat"),
+    x_debug: bool = Header(default=False),
+):
+    question = payload.query.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+    if jina_embeddings is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding service is not configured (JINA_API_KEY is missing).",
+        )
+    touch_session(x_session_id, x_chat_id)
+
+    async def stream_events():
+        yield ": stream-start\n\n"
+        stream_result = None
+        emitted_text = False
+        raw_parts: List[str] = []
+        request_started = time.perf_counter()
+        try:
+            embed_started = time.perf_counter()
+            try:
+                query_embedding = await asyncio.to_thread(
+                    jina_embeddings.embed_query, question
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Stream query embedding failed for session %s: %s",
+                    x_session_id,
+                    exc,
+                )
+                yield _sse_event(
+                    "error",
+                    {
+                        "message": "Embedding service unavailable.",
+                        "streamed": False,
+                    },
+                )
+                return
+            embed_ms = round((time.perf_counter() - embed_started) * 1000)
+
+            retrieve_started = time.perf_counter()
+            try:
+                scored = await asyncio.to_thread(
+                    vector_store.similarity_search_by_vector_with_relevance_scores,
+                    query_embedding,
+                    RETRIEVAL_K,
+                    filter=session_filter(x_session_id, x_chat_id),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Stream query retrieval failed for session %s: %s",
+                    x_session_id,
+                    exc,
+                )
+                scored = []
+            retrieve_ms = round((time.perf_counter() - retrieve_started) * 1000)
+
+            sources = [
+                {
+                    "source": doc.metadata.get("file_name"),
+                    "page": doc.metadata.get("page"),
+                    "location": doc.metadata.get("location"),
+                    "chunk_type": "text",
+                    "relevance_score": round(float(score), 4),
+                }
+                for doc, score in scored
+            ]
+            context = "\n\n".join(
+                f"[{doc.metadata.get('file_name', 'document')} — "
+                f"{doc.metadata.get('location', 'unknown')}]\n{doc.page_content}"
+                for doc, _ in scored
+            )
+            if not context.strip():
+                context = "No relevant context found in uploaded documents for this chat."
+
+            prompt_template = (
+                LEGACY_PROMPT
+                if os.getenv("PROMPT_VERSION", "strict").lower() == "legacy"
+                else STRICT_PROMPT
+            )
+            prompt = prompt_template.format(context=context, question=question)
+
+            def make_groq_prompt(items: List[Any]) -> str:
+                item_context = "\n\n".join(
+                    f"[{doc.metadata.get('file_name', 'document')} — "
+                    f"{doc.metadata.get('location', 'unknown')}]\n{doc.page_content}"
+                    for doc, _ in items
+                ) or "No relevant context found in uploaded documents for this chat."
+                return prompt_template.format(context=item_context, question=question)
+
+            groq_items = list(scored)
+            dropped_chunks = 0
+            while len(make_groq_prompt(groq_items)) > GROQ_MAX_CONTEXT_CHARS and groq_items:
+                groq_items.pop()
+                dropped_chunks += 1
+            groq_prompt = make_groq_prompt(groq_items)
+
+            if await request.is_disconnected():
+                return
+            try:
+                client = get_llm_client()
+                stream_result = await asyncio.to_thread(
+                    client.open_stream, prompt, groq_prompt
+                )
+            except ProviderUnavailableError as exc:
+                logger.warning("All answer stream providers failed before first token: %s", exc)
+                yield _sse_event(
+                    "error",
+                    {
+                        "message": "AI service currently unavailable. Please retry.",
+                        "streamed": False,
+                    },
+                )
+                return
+            except Exception:
+                logger.exception("Could not open the answer stream")
+                yield _sse_event(
+                    "error",
+                    {
+                        "message": "Could not start answer generation. Please retry.",
+                        "streamed": False,
+                    },
+                )
+                return
+
+            if await request.is_disconnected():
+                return
+            yield _sse_event(
+                "meta",
+                {
+                    "sources": sources,
+                    "provider": stream_result.provider,
+                    "model": stream_result.model,
+                },
+            )
+            text_filter = _ThinkTagFilter()
+            raw_parts.append(stream_result.first_chunk)
+            first_visible = text_filter.feed(stream_result.first_chunk)
+            if first_visible:
+                emitted_text = True
+                yield _sse_event("token", {"text": first_visible})
+
+            while not await request.is_disconnected():
+                chunk = await asyncio.to_thread(next, stream_result.chunks, None)
+                if chunk is None:
+                    break
+                raw_parts.append(chunk)
+                visible_chunk = text_filter.feed(chunk)
+                if visible_chunk:
+                    emitted_text = True
+                    yield _sse_event("token", {"text": visible_chunk})
+
+            if await request.is_disconnected():
+                return
+
+            trailing_text = text_filter.flush()
+            if trailing_text:
+                emitted_text = True
+                yield _sse_event("token", {"text": trailing_text})
+
+            answer = message_to_text("".join(raw_parts))
+            total_ms = round((time.perf_counter() - request_started) * 1000)
+            logger.info(
+                "stream_query_timing session=%s provider=%s model=%s chunks=%s total_ms=%s",
+                x_session_id,
+                stream_result.provider,
+                stream_result.model,
+                len(scored),
+                total_ms,
+            )
+            done: Dict[str, Any] = {"answer": answer, "sources": sources}
+            if x_debug:
+                done["debug"] = {
+                    "chunks": [
+                        {
+                            "text": doc.page_content,
+                            "source": doc.metadata.get("file_name"),
+                            "page": doc.metadata.get("page"),
+                            "location": doc.metadata.get("location"),
+                            "relevance_score": round(float(score), 4),
+                        }
+                        for doc, score in scored
+                    ],
+                    "prompt": (
+                        groq_prompt if stream_result.provider == "groq" else prompt
+                    ),
+                    "top_k": RETRIEVAL_K,
+                    "retrieved_count": len(scored),
+                    "provider": stream_result.provider,
+                    "model": stream_result.model,
+                    "attempts": stream_result.attempts,
+                    "dropped_chunks": (
+                        dropped_chunks if stream_result.provider == "groq" else 0
+                    ),
+                    "embed_ms": embed_ms,
+                    "retrieve_ms": retrieve_ms,
+                    "total_ms": total_ms,
+                }
+            yield _sse_event("done", done)
+        except Exception:
+            logger.exception(
+                "Answer stream interrupted for session %s", x_session_id
+            )
+            yield _sse_event(
+                "error",
+                {
+                    "message": (
+                        "The answer was interrupted. Please retry."
+                        if emitted_text
+                        else "Could not generate an answer. Please retry."
+                    ),
+                    "streamed": emitted_text,
+                },
+            )
+        finally:
+            if stream_result is not None:
+                close = getattr(stream_result.chunks, "close", None)
+                if callable(close):
+                    await asyncio.to_thread(close)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    if x_debug:
+        headers["X-Debug"] = "true"
+    return StreamingResponse(
+        stream_events(), media_type="text/event-stream", headers=headers
+    )
 
 
 @app.post("/api/followups")

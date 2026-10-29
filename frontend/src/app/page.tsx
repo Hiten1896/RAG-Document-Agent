@@ -7,12 +7,15 @@ import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
   queryDocument,
+  streamQueryDocument,
+  STREAMING_ENABLED,
   generateFollowups,
   generateMindMap,
   clearSession,
   SourceMetadata,
   QueryDebug,
   MindMapResponse,
+  QueryStreamEvent,
 } from '@/lib/api';
 import {
   createMindMapImage,
@@ -112,6 +115,9 @@ interface Message {
   followups?: string[];
   followupsLoading?: boolean;
   followupsError?: string;
+  streaming?: boolean;
+  interrupted?: boolean;
+  streamError?: string;
 }
 
 interface IngestedFile {
@@ -821,6 +827,7 @@ export default function Home() {
   /* Chat state */
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [openEvidence, setOpenEvidence] = useState<Set<string>>(new Set());
@@ -1055,7 +1062,10 @@ export default function Home() {
 
   /* Refs */
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const streamControllerRef = useRef<AbortController | null>(null);
   // Bumped on unmount and on retry so a resolving ingest can't setState on an
   // unmounted tree or overwrite the result of a newer attempt.
   const pollTokenRef = useRef(0);
@@ -1068,8 +1078,10 @@ export default function Home() {
 
   /* Auto-scroll */
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+    if (shouldAutoScrollRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: streaming ? 'auto' : 'smooth' });
+    }
+  }, [messages, loading, streaming]);
 
   /* Backend health check */
   useEffect(() => {
@@ -1298,14 +1310,103 @@ export default function Home() {
     // retrieval on the chat id, so the answer must come from the vectors of
     // the conversation the message was actually sent in.
     const targetConversationId = activeConversationId;
+    const answerIndex = messages.length + 1;
 
     setQuery('');
     setPendingAttachments([]);
-    setMessagesForActive((prev) => [
-      ...prev,
-      { sender: 'user', text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
-    ]);
+    setMessagesForActive((prev) => {
+      const next = [
+        ...prev,
+        { sender: 'user' as const, text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
+      ];
+      if (STREAMING_ENABLED) {
+        next.push({
+          sender: 'agent',
+          text: '',
+          sources: [],
+          streaming: true,
+        });
+      }
+      return next;
+    });
     setLoading(true);
+
+    if (STREAMING_ENABLED) {
+      const controller = new AbortController();
+      streamControllerRef.current = controller;
+      setStreaming(true);
+      const updateStreamMessage = (update: (message: Message) => Message) => {
+        setMessagesForActive((previous) => {
+          const current = previous[answerIndex];
+          if (!current || current.sender !== 'agent') return previous;
+          const next = [...previous];
+          next[answerIndex] = update(current);
+          return next;
+        });
+      };
+
+      try {
+        await streamQueryDocument(
+          userText,
+          targetConversationId,
+          true,
+          controller.signal,
+          (event: QueryStreamEvent) => {
+            if (event.event === 'meta') {
+              updateStreamMessage((message) => ({
+                ...message,
+                sources: event.data.sources,
+              }));
+            } else if (event.event === 'token') {
+              updateStreamMessage((message) => ({
+                ...message,
+                text: message.text + event.data.text,
+              }));
+            } else if (event.event === 'done') {
+              updateStreamMessage((message) => ({
+                ...message,
+                text: event.data.answer,
+                sources: event.data.sources,
+                debug: event.data.debug,
+                streaming: false,
+                interrupted: false,
+                streamError: undefined,
+              }));
+            } else {
+              updateStreamMessage((message) => ({
+                ...message,
+                text: event.data.streamed
+                  ? message.text
+                  : `Error processing your request: ${event.data.message}`,
+                streaming: false,
+                interrupted: event.data.streamed,
+                streamError: event.data.message,
+              }));
+            }
+          },
+        );
+      } catch (err: unknown) {
+        const message = getErrorMessage(err, 'Could not generate an answer.');
+        updateStreamMessage((current) => ({
+          ...current,
+          text: controller.signal.aborted
+            ? current.text || 'Request stopped.'
+            : current.text || `Error processing your request: ${message}`,
+          streaming: false,
+          interrupted: controller.signal.aborted && Boolean(current.text),
+          streamError: controller.signal.aborted
+            ? 'Answer interrupted. Retry to generate it again.'
+            : message,
+        }));
+      } finally {
+        if (streamControllerRef.current === controller) {
+          streamControllerRef.current = null;
+          setStreaming(false);
+          setLoading(false);
+        }
+      }
+      return;
+    }
 
     try {
       // No `source` filter is passed, so the backend searches across every
@@ -1329,6 +1430,10 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleStopStreaming = () => {
+    streamControllerRef.current?.abort();
   };
 
   const handleSuggestQuestions = async (index: number, answerText: string) => {
@@ -1633,6 +1738,10 @@ export default function Home() {
      history list, rather than wiping the current one. History is session-only
      by design: it lives in component state and is gone on reload. */
   const handleNewChat = () => {
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    setStreaming(false);
+    setLoading(false);
     const newConversation: Conversation = {
       id: makeConversationId(),
       title: 'New Chat',
@@ -1657,6 +1766,10 @@ export default function Home() {
 
   const handleSwitchConversation = (id: string) => {
     if (id === activeConversationId) return;
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    setStreaming(false);
+    setLoading(false);
     setActiveConversationId(id);
     setEditingIndex(null);
     setEditText('');
@@ -2035,7 +2148,15 @@ export default function Home() {
         </div>
 
         {/* ── Chat messages area ── */}
-        <div className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}>
+        <div
+          ref={messagesContainerRef}
+          onScroll={(event) => {
+            const element = event.currentTarget;
+            shouldAutoScrollRef.current =
+              element.scrollHeight - element.scrollTop - element.clientHeight < 100;
+          }}
+          className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}
+        >
 
           {/* Empty state hero — a quiet, personal welcome rather than a
               feature-card grid. The greeting varies with time of day, the
@@ -2114,6 +2235,8 @@ export default function Home() {
             const isUser = msg.sender === 'user';
             const isEditing = editingIndex === index;
             const citedSources = getCitedSources(msg.text, msg.sources);
+            const displaySources =
+              msg.streaming && msg.sources?.length ? msg.sources : citedSources;
             const markdownText = isUser
               ? msg.text
               : linkInlineCitations(msg.text, citedSources);
@@ -2289,6 +2412,17 @@ export default function Home() {
                           >
                             {markdownText}
                           </Markdown>
+                          {msg.streaming && (
+                            <span
+                              aria-label="Answer streaming"
+                              className="ml-1 inline-block h-4 animate-pulse border-l-2 border-indigo-500 align-middle"
+                            />
+                          )}
+                          {msg.interrupted && (
+                            <p role="status" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                              Answer interrupted. Retry to generate it again.
+                            </p>
+                          )}
                         </div>
                       )}
 
@@ -2298,17 +2432,17 @@ export default function Home() {
                           <div className="font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
                             <span>Sources cited in this answer</span>
                             <span className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
-                              ({citedSources.length})
+                              ({displaySources.length})
                             </span>
                           </div>
 
-                          {citedSources.length === 0 ? (
+                          {displaySources.length === 0 ? (
                             <p className="text-slate-500 dark:text-slate-400">
                               No supporting passages cited
                             </p>
                           ) : (
                             <div className="flex flex-wrap gap-1.5">
-                            {citedSources.map((src, srcIndex) => {
+                            {displaySources.map((src, srcIndex) => {
                               const isVisual = src.chunk_type === 'visual';
                               const pageText = src.page
                                 ? `Page ${src.page}`
@@ -2602,6 +2736,15 @@ export default function Home() {
                   Searching your documents and preparing an answer...
                 </span>
                 <span className="sm:hidden">Generating answer...</span>
+                {streaming && (
+                  <button
+                    type="button"
+                    onClick={handleStopStreaming}
+                    className="ml-1 rounded-md border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Stop
+                  </button>
+                )}
               </div>
             </div>
           )}

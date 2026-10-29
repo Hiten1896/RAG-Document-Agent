@@ -49,6 +49,10 @@ GROQ_MAX_CONTEXT_CHARS=12000
 PROMPT_VERSION=strict
 ```
 
+For the frontend, streaming can be enabled with
+`NEXT_PUBLIC_ENABLE_STREAMING=true`. It is disabled by default until the
+deployed Render backend has been verified not to buffer SSE responses.
+
 The strict prompt answers only from retrieved context and uses the exact refusal
 `I could not find this in the uploaded documents.` when the context does not
 contain the answer. Set `PROMPT_VERSION=legacy` only to compare the previous
@@ -58,12 +62,13 @@ prompt.
 
 - `POST /api/ingest` uploads and indexes one supported document.
 - `POST /api/query` retrieves chunks and generates an answer.
+- `POST /api/query/stream` streams grounded answers as Server-Sent Events; the existing `/api/query` remains unchanged.
 - `POST /api/followups` generates three document-grounded follow-up questions for a prior question.
 - `POST /api/mindmap` generates a structured mind map from the active chat's documents.
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
-Use `X-Session-Id` and `X-Chat-Id` on ingest/query/followups/mindmap. Add `X-Debug: true`
-to query responses to receive retrieved chunks, relevance scores, the exact
+Use `X-Session-Id` and `X-Chat-Id` on ingest/query/stream/followups/mindmap. Add
+`X-Debug: true` to query responses to receive retrieved chunks, relevance scores, the exact
 prompt, provider/model, routing attempts, and any Groq context trimming. Mind
 map responses include provider/model, chunk count, cache status, and timings
 when requested. Follow-up generation is lazy: click **Suggest questions** below

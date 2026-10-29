@@ -27,6 +27,139 @@ export interface QueryResponse {
   debug?: QueryDebug;
 }
 
+export type QueryStreamEvent =
+  | {
+      event: 'meta';
+      data: { sources: SourceMetadata[]; provider: string; model: string };
+    }
+  | { event: 'token'; data: { text: string } }
+  | {
+      event: 'done';
+      data: { answer: string; sources: SourceMetadata[]; debug?: QueryDebug };
+    }
+  | { event: 'error'; data: { message: string; streamed: boolean } };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSourceMetadata(value: unknown): value is SourceMetadata {
+  if (!isRecord(value)) return false;
+  return (
+    (value.source === undefined || typeof value.source === 'string') &&
+    (value.page === undefined || typeof value.page === 'number') &&
+    (value.location === undefined || typeof value.location === 'string') &&
+    (value.chunk_type === undefined ||
+      value.chunk_type === 'text' ||
+      value.chunk_type === 'visual') &&
+    (value.image_key === undefined || typeof value.image_key === 'string') &&
+    (value.relevance_score === undefined ||
+      typeof value.relevance_score === 'number')
+  );
+}
+
+function isQueryDebug(value: unknown): value is QueryDebug {
+  if (!isRecord(value) || !Array.isArray(value.chunks)) return false;
+  const chunksAreValid = value.chunks.every(
+    (chunk) =>
+      isRecord(chunk) &&
+      typeof chunk.text === 'string' &&
+      (chunk.source === undefined || typeof chunk.source === 'string') &&
+      (chunk.page === undefined || typeof chunk.page === 'number') &&
+      (chunk.location === undefined || typeof chunk.location === 'string') &&
+      (chunk.relevance_score === undefined ||
+        typeof chunk.relevance_score === 'number'),
+  );
+  const attemptsAreValid =
+    value.attempts === undefined ||
+    (Array.isArray(value.attempts) &&
+      value.attempts.every(
+        (attempt) =>
+          isRecord(attempt) &&
+          typeof attempt.provider === 'string' &&
+          typeof attempt.model === 'string' &&
+          typeof attempt.status === 'string' &&
+          (attempt.ms === undefined || typeof attempt.ms === 'number'),
+      ));
+  const optionalTimings = [
+    'dropped_chunks',
+    'embed_ms',
+    'retrieve_ms',
+    'total_ms',
+  ];
+  return (
+    chunksAreValid &&
+    attemptsAreValid &&
+    typeof value.prompt === 'string' &&
+    typeof value.top_k === 'number' &&
+    typeof value.retrieved_count === 'number' &&
+    (value.provider === undefined || typeof value.provider === 'string') &&
+    (value.model === undefined || typeof value.model === 'string') &&
+    optionalTimings.every(
+      (key) => value[key] === undefined || typeof value[key] === 'number',
+    )
+  );
+}
+
+function parseQueryStreamEvent(
+  eventName: string,
+  value: unknown,
+): QueryStreamEvent | null {
+  if (!isRecord(value)) {
+    throw new Error('The backend returned malformed streaming data.');
+  }
+  if (eventName === 'meta') {
+    if (
+      !Array.isArray(value.sources) ||
+      !value.sources.every(isSourceMetadata) ||
+      typeof value.provider !== 'string' ||
+      typeof value.model !== 'string'
+    ) {
+      throw new Error('The backend returned malformed stream metadata.');
+    }
+    return {
+      event: 'meta',
+      data: { sources: value.sources, provider: value.provider, model: value.model },
+    };
+  }
+  if (eventName === 'token') {
+    if (typeof value.text !== 'string') {
+      throw new Error('The backend returned an invalid answer token.');
+    }
+    return { event: 'token', data: { text: value.text } };
+  }
+  if (eventName === 'done') {
+    if (
+      typeof value.answer !== 'string' ||
+      !Array.isArray(value.sources) ||
+      !value.sources.every(isSourceMetadata)
+    ) {
+      throw new Error('The backend returned an invalid completed answer.');
+    }
+    let debug: QueryDebug | undefined;
+    if (value.debug !== undefined) {
+      if (!isQueryDebug(value.debug)) {
+        throw new Error('The backend returned malformed answer evidence.');
+      }
+      debug = value.debug;
+    }
+    return {
+      event: 'done',
+      data: { answer: value.answer, sources: value.sources, debug },
+    };
+  }
+  if (eventName === 'error') {
+    if (typeof value.message !== 'string' || typeof value.streamed !== 'boolean') {
+      throw new Error('The backend returned an invalid stream error.');
+    }
+    return {
+      event: 'error',
+      data: { message: value.message, streamed: value.streamed },
+    };
+  }
+  return null;
+}
+
 export interface FollowupsResponse {
   questions: string[];
   debug?: {
@@ -99,6 +232,8 @@ export interface QueryDebug {
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://127.0.0.1:8000';
+export const STREAMING_ENABLED =
+  process.env.NEXT_PUBLIC_ENABLE_STREAMING === 'true';
 
 /**
  * Every path is prefixed with /api. The frontend previously called /ingest,
@@ -268,6 +403,100 @@ export async function queryDocument(
           }
         : undefined,
   };
+}
+
+export async function streamQueryDocument(
+  query: string,
+  chatId: string | undefined,
+  debug: boolean,
+  signal: AbortSignal,
+  onEvent: (event: QueryStreamEvent) => void,
+): Promise<void> {
+  const timeoutController = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => timeoutController.abort(new DOMException('Query timed out.', 'TimeoutError')),
+    QUERY_TIMEOUT_MS,
+  );
+  const forwardAbort = () => timeoutController.abort(signal.reason);
+  signal.addEventListener('abort', forwardAbort, { once: true });
+
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}/query/stream`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...sessionHeaders(chatId),
+        ...(debug ? { 'X-Debug': 'true' } : {}),
+      },
+      body: JSON.stringify({ query }),
+      signal: timeoutController.signal,
+      cache: 'no-store',
+    });
+  } catch (err) {
+    window.clearTimeout(timeoutId);
+    signal.removeEventListener('abort', forwardAbort);
+    describeNetworkError(err, 'The streaming query timed out. Please retry.');
+  }
+
+  try {
+    if (!response.ok) {
+      throw await parseErrorResponse(response, 'Failed to stream the answer.');
+    }
+    if (!response.body) {
+      throw new Error('The backend did not provide a streaming response.');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let receivedTerminalEvent = false;
+    const dispatchBlock = (block: string) => {
+      let eventName = 'message';
+      const dataLines: string[] = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith(':')) continue;
+        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+      }
+      if (!dataLines.length) return;
+      let data: unknown;
+      try {
+        data = JSON.parse(dataLines.join('\n'));
+      } catch {
+        throw new Error('The backend returned malformed streaming data.');
+      }
+      const event = parseQueryStreamEvent(eventName, data);
+      if (event) {
+        onEvent(event);
+        if (event.event === 'done' || event.event === 'error') {
+          receivedTerminalEvent = true;
+        }
+      }
+    };
+
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      while (true) {
+        const boundary = /\r?\n\r?\n/.exec(buffer);
+        if (!boundary || boundary.index === undefined) break;
+        dispatchBlock(buffer.slice(0, boundary.index));
+        buffer = buffer.slice(boundary.index + boundary[0].length);
+      }
+      if (done) {
+        if (buffer.trim()) dispatchBlock(buffer);
+        if (!receivedTerminalEvent) {
+          throw new Error('The answer stream ended before completion.');
+        }
+        break;
+      }
+    }
+  } finally {
+    window.clearTimeout(timeoutId);
+    signal.removeEventListener('abort', forwardAbort);
+  }
 }
 
 export async function generateFollowups(

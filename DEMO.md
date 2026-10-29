@@ -21,7 +21,11 @@
 9. Use **Export this answer** to save one answer and **Export chat** to save the
    conversation. Try both Word and PDF; open Show evidence first to include
    retrieved passages, and generate a mind map to include its image.
-10. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
+10. If the deployed Render service has passed the SSE buffering check and
+   `NEXT_PUBLIC_ENABLE_STREAMING=true`, ask a question and show tokens arriving,
+   the Stop control, and the final evidence panel. Otherwise the standard
+   non-streaming query remains the default.
+11. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
    no-context comparison results.
 
 Uploads are held in an in-memory ChromaDB collection and are lost when the
