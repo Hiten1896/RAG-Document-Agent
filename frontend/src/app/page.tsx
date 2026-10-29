@@ -1,17 +1,34 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
   queryDocument,
+  streamQueryDocument,
+  STREAMING_ENABLED,
+  generateFollowups,
   generateMindMap,
+  generateQuiz,
+  compareDocuments,
   clearSession,
   SourceMetadata,
   QueryDebug,
   MindMapResponse,
+  QueryStreamEvent,
+  QuizDifficulty,
+  QuizResponse,
+  CompareResponse,
 } from '@/lib/api';
+import {
+  createMindMapImage,
+  downloadWordDocument,
+  ExportDocument,
+  ExportEntry,
+  sanitizeExportFilename,
+} from '@/lib/export';
 import {
   Send,
   FileText,
@@ -34,10 +51,6 @@ import {
   PanelLeftOpen,
   MoreHorizontal,
   Trash2,
-  ChevronLeft,
-  ChevronRight,
-  ZoomIn,
-  ZoomOut,
   RefreshCw,
   Copy,
   Check,
@@ -45,6 +58,8 @@ import {
   ShieldAlert,
   ListChecks,
   GitCompareArrows,
+  BookOpen,
+  CalendarDays,
   Download,
   BookmarkCheck,
   GitBranch,
@@ -95,6 +110,14 @@ const MindMapPanel = dynamic(() => import('./MindMapPanel'), {
   ),
 });
 
+const QuizPanel = dynamic(() => import('./QuizPanel'), {
+  ssr: false,
+});
+
+const ComparePanel = dynamic(() => import('./ComparePanel'), {
+  ssr: false,
+});
+
 /* ───── Types ───── */
 interface Message {
   sender: 'user' | 'agent';
@@ -102,10 +125,17 @@ interface Message {
   sources?: SourceMetadata[];
   debug?: QueryDebug;
   attachedFiles?: string[];
+  followups?: string[];
+  followupsLoading?: boolean;
+  followupsError?: string;
+  streaming?: boolean;
+  interrupted?: boolean;
+  streamError?: string;
 }
 
 interface IngestedFile {
   name: string;
+  chatId: string;
   status: 'processing' | 'completed' | 'failed';
   pages?: number;
   chunks?: number;
@@ -130,6 +160,68 @@ interface SavedArtifact {
   createdAt: string;
 }
 
+type ExportFormat = 'pdf' | 'docx';
+
+interface ExportMenuProps {
+  label: string;
+  disabled?: boolean;
+  onExport: (format: ExportFormat) => void;
+}
+
+function ExportMenu({ label, disabled = false, onExport }: ExportMenuProps) {
+  const chooseFormat = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    format: ExportFormat,
+  ) => {
+    event.currentTarget.closest('details')?.removeAttribute('open');
+    onExport(format);
+  };
+
+  return (
+    <details className="group/export relative">
+      <summary
+        aria-label={label}
+        className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300"
+      >
+        <Download className="h-3.5 w-3.5" />
+        {label}
+      </summary>
+      <div className="absolute bottom-full left-0 z-30 mb-1 min-w-32 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={(event) => chooseFormat(event, 'pdf')}
+          className="block w-full rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          Save as PDF
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={(event) => chooseFormat(event, 'docx')}
+          className="block w-full rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          Save as Word
+        </button>
+      </div>
+    </details>
+  );
+}
+
+interface SpeechRecognitionLike {
+  continuous: boolean;
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  onresult: ((event: { results: SpeechRecognitionResultList }) => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
 // Session-only: kept in memory for the tab's lifetime, not persisted to
 // localStorage/sessionStorage, so a reload starts fresh by design.
 function makeConversationId(): string {
@@ -139,6 +231,20 @@ function makeConversationId(): string {
 function titleFromQuery(text: string): string {
   const trimmed = text.trim();
   return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
+}
+
+function subscribeToTheme(onChange: () => void): () => void {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+  return () => observer.disconnect();
+}
+
+function getThemeSnapshot(): 'dark' | 'light' {
+  return document.documentElement.classList.contains('light') ? 'light' : 'dark';
+}
+
+function getServerThemeSnapshot(): 'dark' {
+  return 'dark';
 }
 
 // Formats the backend accepts. Kept next to titleFromQuery so the upload filter
@@ -156,6 +262,7 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
 ]);
 
 const SUPPORTED_UPLOAD_LABEL = 'PDF, DOCX, PPTX, XLSX, CSV, TXT, MD';
+const REFUSAL_ANSWER = 'I could not find this in the uploaded documents.';
 
 const SUPPORTED_UPLOAD_ACCEPT = [
   'application/pdf',
@@ -170,6 +277,8 @@ const ANALYSIS_PRESETS = [
       'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
     icon: ClipboardList,
     isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Mind map',
@@ -177,6 +286,17 @@ const ANALYSIS_PRESETS = [
     prompt: '',
     icon: GitBranch,
     isMindMap: true,
+    isQuiz: false,
+    isCompare: false,
+  },
+  {
+    label: 'Quiz me',
+    hint: 'Practice with document facts',
+    prompt: '',
+    icon: CheckCircle2,
+    isMindMap: false,
+    isQuiz: true,
+    isCompare: false,
   },
   {
     label: 'Key risks',
@@ -185,6 +305,8 @@ const ANALYSIS_PRESETS = [
       'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
     icon: ShieldAlert,
     isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Action items',
@@ -193,17 +315,116 @@ const ANALYSIS_PRESETS = [
       'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
     icon: ListChecks,
     isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Compare documents',
     hint: 'Agreements and differences',
-    prompt:
-      'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
+    prompt: '',
     icon: GitCompareArrows,
     isMindMap: false,
+    isQuiz: false,
+    isCompare: true,
+  },
+  {
+    label: 'Key terms',
+    hint: 'Define important concepts',
+    prompt:
+      'Create a concise glossary of important terms and concepts from the uploaded documents. Explain each in plain language and cite the supporting page or location.',
+    icon: BookOpen,
+    isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
+  },
+  {
+    label: 'Timeline',
+    hint: 'Important dates and events',
+    prompt:
+      'Build a chronological timeline of the important dates and events stated in the uploaded documents. Include the event and its supporting page or location, and do not infer dates.',
+    icon: CalendarDays,
+    isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
   },
 ];
 
+const GREETINGS: Record<
+  'morning' | 'afternoon' | 'evening' | 'night',
+  { headline: string; subtext: string }[]
+> = {
+  morning: [
+    { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
+    { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
+    { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
+    { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
+    { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
+  ],
+  afternoon: [
+    { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
+    { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
+    { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
+    { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
+    { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
+  ],
+  evening: [
+    { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
+    { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
+    { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
+    { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
+    { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
+  ],
+  night: [
+    { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
+    { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
+    { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
+    { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
+    { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
+  ],
+};
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function linkInlineCitations(answer: string, sources: SourceMetadata[]): string {
+  const fileNames = [...new Set(sources.map((source) => source.source).filter(Boolean))]
+    .sort((left, right) => (right?.length ?? 0) - (left?.length ?? 0))
+    .filter((name): name is string => Boolean(name));
+  if (!fileNames.length) return answer;
+
+  const pattern = new RegExp(
+    `(${fileNames.map(escapeRegExp).join('|')})(?:\\s*[,;–—-]?\\s*(?:page|p\\.?|slide|sheet)\\s*([\\w-]+))?`,
+    'gi',
+  );
+  return answer.replace(pattern, (match, fileName: string, locationToken?: string) => {
+    const sameFileSources = sources.filter(
+      (source) => source.source?.toLowerCase() === fileName.toLowerCase(),
+    );
+    const selectedSource = locationToken
+      ? sameFileSources.find(
+          (source) =>
+            String(source.page ?? '').toLowerCase() === locationToken.toLowerCase() ||
+            source.location?.toLowerCase().endsWith(locationToken.toLowerCase()),
+        ) ?? sameFileSources[0]
+      : sameFileSources[0];
+    if (!selectedSource) return match;
+    const sourceIndex = sources.indexOf(selectedSource);
+    if (sourceIndex < 0) return match;
+    return `[${match.replace(/([\\[\]])/g, '\\$1')}](docagent-citation:${sourceIndex})`;
+  });
+}
+
+function getSourceExcerpt(
+  debug: QueryDebug | undefined,
+  source: SourceMetadata,
+): string | undefined {
+  return debug?.chunks.find(
+    (chunk) =>
+      chunk.source === source.source &&
+      (source.page ? chunk.page === source.page : chunk.location === source.location),
+  )?.text;
+}
 
 /* ───── Brand mark ─────
    An open document with a spark of insight rising from the page — reads at
@@ -442,7 +663,6 @@ function ChatComposer({
 export default function Home() {
   /* Upload state — multiple files can now be ingested and queried together */
   const [ingestedFiles, setIngestedFiles] = useState<IngestedFile[]>([]);
-  const [uploading, setUploading] = useState(false);
 
   /* Chat history — session-only (kept in memory, never persisted), so a
      reload intentionally starts clean. Each conversation is independent;
@@ -502,17 +722,46 @@ export default function Home() {
   const [viewerFile, setViewerFile] = useState<string | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [viewerPage, setViewerPage] = useState<number | null>(null);
+  const [viewerLocation, setViewerLocation] = useState<string | null>(null);
+  const [viewerText, setViewerText] = useState<string | null>(null);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
   const [mindMapError, setMindMapError] = useState<string | null>(null);
   const [mindMapTopic, setMindMapTopic] = useState('');
   const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [quizData, setQuizData] = useState<QuizResponse | null>(null);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizError, setQuizError] = useState<string | null>(null);
+  const [quizConversationId, setQuizConversationId] = useState(activeConversationId);
+  const [quizPanelVersion, setQuizPanelVersion] = useState(0);
+  const quizRequestIdRef = useRef(0);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareData, setCompareData] = useState<CompareResponse | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [compareConversationId, setCompareConversationId] =
+    useState(activeConversationId);
+  const compareRequestIdRef = useRef(0);
+  const [visibleAnalysisPresets, setVisibleAnalysisPresets] = useState(() => [
+    ...ANALYSIS_PRESETS.filter((preset) => preset.isQuiz),
+    ...ANALYSIS_PRESETS.filter((preset) => !preset.isQuiz).slice(0, 3),
+  ]);
+  const [suggestionNotice, setSuggestionNotice] = useState<string | null>(null);
 
   const openFileViewer = useCallback(
-    (fname: string, page?: number) => {
-      const match = ingestedFiles.find((f) => f.name === fname && f.file);
+    (fname: string, page?: number, location?: string, excerpt?: string) => {
+      const match = ingestedFiles.find(
+        (f) =>
+          f.chatId === activeConversationId &&
+          f.name === fname &&
+          f.file,
+      );
       if (!match?.file) return;
+      setViewerPage(page ?? null);
+      setViewerLocation(location ?? null);
+      setViewerText(excerpt ?? null);
       // Re-opening the file that's already showing used to still mint a new
       // blob URL every time this ran. PdfPreview resets pageNumber/zoom/
       // loadError whenever `fileUrl` changes, so a fresh URL for the same
@@ -520,7 +769,6 @@ export default function Home() {
       // the "flickers, then normal once touched" symptom. Only the page
       // number needs to move when it's the same file already open.
       if (fname === viewerFile) {
-        setViewerPage(page ?? null);
         return;
       }
       // react-pdf can only render actual PDFs. For every other supported
@@ -534,7 +782,6 @@ export default function Home() {
           return null;
         });
         setViewerFile(fname);
-        setViewerPage(page ?? null);
         return;
       }
       const url = URL.createObjectURL(match.file);
@@ -543,14 +790,15 @@ export default function Home() {
         return url;
       });
       setViewerFile(fname);
-      setViewerPage(page ?? null);
     },
-    [ingestedFiles, viewerFile]
+    [activeConversationId, ingestedFiles, viewerFile]
   );
 
   const closeFileViewer = useCallback(() => {
     setViewerFile(null);
     setViewerPage(null);
+    setViewerLocation(null);
+    setViewerText(null);
     setViewerUrl((prevUrl) => {
       if (prevUrl) URL.revokeObjectURL(prevUrl);
       return null;
@@ -581,87 +829,65 @@ export default function Home() {
     };
   }, [viewerFile]);
 
-  /* Empty-state greeting — must NOT be computed during the initial render.
-     `new Date().getHours()` differs between the server's clock (SSR) and
-     the browser's local clock, so computing it eagerly produces two
-     different strings — the server's version flashes, then snaps to the
-     client's on hydration. Instead it starts empty and is set once in an
-     effect, which only ever runs client-side, so there's exactly one
-     render of it and no mismatch.
-
-     Four real periods (morning / afternoon / evening / night), each with
-     five headline + subtext pairs. Picked in a fixed round-robin order
-     (not random) so consecutive visits within the same period never repeat
-     the same line back-to-back — the next index per period is remembered
-     in localStorage across reloads/sessions. */
-  const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
-    morning: [
-      { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
-      { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
-      { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
-      { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
-      { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
-    ],
-    afternoon: [
-      { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
-      { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
-      { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
-      { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
-      { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
-    ],
-    evening: [
-      { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
-      { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
-      { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
-      { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
-      { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
-    ],
-    night: [
-      { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
-      { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
-      { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
-      { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
-      { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
-    ],
-  };
-
   const [greeting, setGreeting] = useState('');
   const [greetingSubtext, setGreetingSubtext] = useState(
     'Add a document to get started, or ask me about something you\u2019ve already shared.'
   );
 
   useEffect(() => {
-    const hour = new Date().getHours();
-    // morning 4–12, afternoon 12–16, evening 16–20, night 20–4 (wraps past midnight)
-    const period: keyof typeof GREETINGS =
-      hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
-    const pool = GREETINGS[period];
+    const frame = window.requestAnimationFrame(() => {
+      const hour = new Date().getHours();
+      const period: keyof typeof GREETINGS =
+        hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
+      const pool = GREETINGS[period];
+      const storageKey = `docagent_greeting_idx_${period}`;
+      let nextIndex = 0;
+      try {
+        const stored = window.localStorage.getItem(storageKey);
+        const parsed = stored !== null ? parseInt(stored, 10) : -1;
+        nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
+        window.localStorage.setItem(storageKey, String(nextIndex));
+      } catch {
+        nextIndex = 0;
+      }
 
-    // Sequential, not random: read the last-used index for this period from
-    // localStorage, advance it by one (wrapping around), and persist it —
-    // so the very next visit during the same period is guaranteed to be a
-    // different line, cycling through all five before any repeat.
-    const storageKey = `docagent_greeting_idx_${period}`;
-    let nextIndex = 0;
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      const parsed = stored !== null ? parseInt(stored, 10) : -1;
-      nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
-      window.localStorage.setItem(storageKey, String(nextIndex));
-    } catch {
-      // localStorage unavailable (private browsing, etc.) — fall back to
-      // the first line in the period rather than breaking the greeting.
-      nextIndex = 0;
-    }
+      const pick = pool[nextIndex];
+      setGreeting(pick.headline);
+      setGreetingSubtext(pick.subtext);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
 
-    const pick = pool[nextIndex];
-    setGreeting(pick.headline);
-    setGreetingSubtext(pick.subtext);
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const quizPreset = ANALYSIS_PRESETS.find((preset) => preset.isQuiz);
+      const shuffled = ANALYSIS_PRESETS.filter((preset) => !preset.isQuiz);
+      for (let index = shuffled.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+      }
+      const nextPresets = [
+        ...(quizPreset ? [quizPreset] : []),
+        ...shuffled.slice(0, quizPreset ? 3 : 4),
+      ];
+      setVisibleAnalysisPresets(nextPresets);
+
+      try {
+        window.localStorage.setItem(
+          'docagent_analysis_presets',
+          JSON.stringify(nextPresets.map((preset) => preset.label))
+        );
+      } catch {
+        // A reload is still randomized even without localStorage.
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   /* Chat state */
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
+  const [streaming, setStreaming] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [openEvidence, setOpenEvidence] = useState<Set<string>>(new Set());
@@ -749,7 +975,11 @@ export default function Home() {
   }, [closeFileViewer]);
 
   /* Theme state */
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const theme = useSyncExternalStore(
+    subscribeToTheme,
+    getThemeSnapshot,
+    getServerThemeSnapshot
+  );
 
   const applyTheme = (targetTheme: 'dark' | 'light') => {
     const root = document.documentElement;
@@ -764,15 +994,6 @@ export default function Home() {
     }
   };
 
-  // The inline script in layout.tsx already put the right class on <html> before
-  // first paint. This only syncs React state to that, so the toggle icon matches
-  // what's on screen — it must not re-derive or re-apply the theme, which is
-  // what previously forced the whole app to stay `invisible` until hydration.
-  useEffect(() => {
-    const root = document.documentElement;
-    setTheme(root.classList.contains('light') ? 'light' : 'dark');
-  }, []);
-
   // The OS theme can change while the page is open. Follow it only while the
   // user has not pinned a choice of their own.
   useEffect(() => {
@@ -786,7 +1007,6 @@ export default function Home() {
         // localStorage unavailable — fall through and follow the system
       }
       const next = event.matches ? 'light' : 'dark';
-      setTheme(next);
       applyTheme(next);
     };
 
@@ -800,7 +1020,6 @@ export default function Home() {
       e.stopPropagation();
     }
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
-    setTheme(nextTheme);
     applyTheme(nextTheme);
 
     try {
@@ -813,7 +1032,7 @@ export default function Home() {
   /* Voice search setup */
   const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   useEffect(() => {
     return () => {
@@ -840,8 +1059,12 @@ export default function Home() {
     }
 
     if (typeof window === 'undefined') return;
+    const speechWindow = window as Window & {
+      SpeechRecognition?: SpeechRecognitionConstructor;
+      webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    };
     const SpeechRecognitionCtor =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
 
     if (!SpeechRecognitionCtor) {
       setMicError('Voice search is not supported in this browser.');
@@ -866,8 +1089,8 @@ export default function Home() {
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
 
-      recognition.onresult = (event: any) => {
-        const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
+      recognition.onresult = (event) => {
+        const transcript = event.results[0]?.[0]?.transcript ?? '';
         if (transcript.trim()) {
           setQuery(transcript.trim());
         }
@@ -877,7 +1100,7 @@ export default function Home() {
         setListening(false);
       };
 
-      recognition.onerror = (event: any) => {
+      recognition.onerror = (event) => {
         setListening(false);
         const code = event?.error;
         if (code === 'not-allowed' || code === 'service-not-allowed') {
@@ -899,21 +1122,27 @@ export default function Home() {
 
   /* Refs */
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Bumped on unmount and on retry so a resolving ingest can't setState on an
-  // unmounted tree or overwrite the result of a newer attempt.
-  const pollTokenRef = useRef(0);
+  const streamControllerRef = useRef<AbortController | null>(null);
+  // Per-file tokens let parallel uploads complete independently while still
+  // making a newer retry supersede an older request for the same file.
+  const pollTokenRef = useRef(new Map<string, number>());
 
   useEffect(() => {
+    const requestTokens = pollTokenRef.current;
     return () => {
-      pollTokenRef.current++;
+      requestTokens.clear();
     };
   }, []);
 
   /* Auto-scroll */
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+    if (shouldAutoScrollRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: streaming ? 'auto' : 'smooth' });
+    }
+  }, [messages, loading, streaming]);
 
   /* Backend health check */
   useEffect(() => {
@@ -973,7 +1202,7 @@ export default function Home() {
     setDragOver(false);
   }, []);
 
-  const onDrop = useCallback(async (e: React.DragEvent) => {
+  const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
@@ -982,12 +1211,12 @@ export default function Home() {
     if (droppedFiles.length) {
       await ingestMultiple(droppedFiles);
     }
-  }, []);
+  };
 
   /* Ingestion — fires all files off in parallel; each tracks its own status
      entry in ingestedFiles, shown as a file card (loading/success/failed),
      so one file failing doesn't hide another's progress or overwrite its result. */
-  const ingestMultiple = async (files: File[]) => {
+  async function ingestMultiple(files: File[]) {
     // Previously filtered to `.pdf` only, so a dropped DOCX/PPTX/XLSX was
     // discarded silently — no card, no error, nothing. The backend reads all of
     // these now, and anything outside the list gets a failed card explaining why
@@ -1003,9 +1232,14 @@ export default function Home() {
 
     if (rejected.length) {
       setIngestedFiles((prev) => [
-        ...prev.filter((f) => !rejected.some((r) => r.name === f.name)),
+        ...prev.filter(
+          (f) =>
+            f.chatId !== activeConversationId ||
+            !rejected.some((r) => r.name === f.name),
+        ),
         ...rejected.map((f) => ({
           name: f.name,
+          chatId: activeConversationId,
           status: 'failed' as const,
           error: `Unsupported file type. Supported: ${SUPPORTED_UPLOAD_LABEL}.`,
         })),
@@ -1016,33 +1250,38 @@ export default function Home() {
     // for a failed file goes through handleRetryIngest instead, which
     // explicitly re-triggers that one file.
     const newFiles = accepted.filter((f) => {
-      const existing = ingestedFiles.find((ef) => ef.name === f.name);
+      const existing = ingestedFiles.find(
+        (ef) => ef.name === f.name && ef.chatId === activeConversationId,
+      );
       return !existing || existing.status === 'failed';
     });
 
     if (!newFiles.length) return;
 
     setSidebarOpen(false);
-    setUploading(true);
     await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
-    setUploading(false);
-  };
+  }
 
-  const triggerAutoIngest = async (fileToIngest: File) => {
+  async function triggerAutoIngest(
+    fileToIngest: File,
+    targetChatId = activeConversationId,
+  ) {
     const name = fileToIngest.name;
 
     // Guards against a stale response overwriting a newer one for the same
     // filename — a retry started while the first request is still in flight.
-    const requestToken = ++pollTokenRef.current;
-    const isStale = () => pollTokenRef.current !== requestToken;
+    const requestKey = JSON.stringify([targetChatId, name]);
+    const requestToken = (pollTokenRef.current.get(requestKey) ?? 0) + 1;
+    pollTokenRef.current.set(requestKey, requestToken);
+    const isStale = () => pollTokenRef.current.get(requestKey) !== requestToken;
 
     // Captured now: the active chat can change while the upload is in flight,
     // and the document must be indexed under the chat it was dropped into.
-    const targetChatId = activeConversationId;
-
     setIngestedFiles((prev) => [
-      ...prev.filter((f) => f.name !== name),
-      { name, status: 'processing', file: fileToIngest },
+      ...prev.filter(
+        (f) => f.name !== name || f.chatId !== targetChatId,
+      ),
+      { name, chatId: targetChatId, status: 'processing', file: fileToIngest },
     ]);
     setPendingAttachments((prev) => (prev.includes(name) ? prev : [...prev, name]));
 
@@ -1057,7 +1296,7 @@ export default function Home() {
 
       setIngestedFiles((prev) =>
         prev.map((f) =>
-          f.name === name
+          f.name === name && f.chatId === targetChatId
             ? { ...f, status: 'completed', pages: res.pages, chunks: res.chunks }
             : f
         )
@@ -1066,17 +1305,21 @@ export default function Home() {
       if (isStale()) return;
       const message = getErrorMessage(err, 'Failed to communicate with backend.');
       setIngestedFiles((prev) =>
-        prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
+        prev.map((f) =>
+          f.name === name && f.chatId === targetChatId
+            ? { ...f, status: 'failed', error: message }
+            : f,
+        ),
       );
     }
-  };
+  }
 
   /* Retry — re-triggers ingestion for a failed file using the File object
      already held onto from the original upload, so the user doesn't have
      to re-pick it from disk. */
   const handleRetryIngest = (fileToRetry: IngestedFile) => {
     if (!fileToRetry.file) return;
-    triggerAutoIngest(fileToRetry.file);
+    triggerAutoIngest(fileToRetry.file, fileToRetry.chatId);
   };
 
   const handleGenerateMindMap = async (topic?: string, regenerate = false) => {
@@ -1088,7 +1331,12 @@ export default function Home() {
     setMindMapTopic(normalizedTopic);
     if (!regenerate) setMindMapData(null);
 
-    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === targetConversationId && file.status === 'completed',
+      )
+    ) {
       setMindMapData(null);
       setMindMapError('Upload a document to create a grounded mind map.');
       setMindMapLoading(false);
@@ -1115,6 +1363,148 @@ export default function Home() {
     }
   };
 
+  const handleOpenQuiz = () => {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === activeConversationId && file.status === 'completed',
+      )
+    ) {
+      setSuggestionNotice('Upload a document first, then tap “Quiz me” to practice its facts.');
+      return;
+    }
+
+    setSuggestionNotice(null);
+    setQuizConversationId(activeConversationId);
+    setQuizData(null);
+    setQuizError(null);
+    setQuizOpen(true);
+  };
+
+  const handleGenerateQuiz = async (
+    count: number,
+    difficulty: QuizDifficulty,
+  ) => {
+    const targetConversationId = activeConversationId;
+    const requestId = quizRequestIdRef.current + 1;
+    quizRequestIdRef.current = requestId;
+    setQuizConversationId(targetConversationId);
+    setQuizData(null);
+    setQuizError(null);
+    setQuizLoading(true);
+    try {
+      const result = await generateQuiz(count, difficulty, targetConversationId);
+      if (
+        quizRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setQuizData(result);
+        setQuizPanelVersion((version) => version + 1);
+      }
+    } catch (err: unknown) {
+      if (
+        quizRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setQuizError(getErrorMessage(err, 'Could not generate the quiz.'));
+      }
+    } finally {
+      if (quizRequestIdRef.current === requestId) {
+        setQuizLoading(false);
+      }
+    }
+  };
+
+  const handleCloseQuiz = () => {
+    quizRequestIdRef.current += 1;
+    setQuizOpen(false);
+    setQuizLoading(false);
+  };
+
+  const handleOpenCompare = () => {
+    setSuggestionNotice(null);
+    setCompareConversationId(activeConversationId);
+    setCompareData(null);
+    setCompareError(null);
+    setCompareOpen(true);
+  };
+
+  const handleCompareDocuments = async (
+    fileA: string,
+    fileB: string,
+    focus: string,
+  ) => {
+    const targetConversationId = activeConversationId;
+    const requestId = compareRequestIdRef.current + 1;
+    compareRequestIdRef.current = requestId;
+    setCompareConversationId(targetConversationId);
+    setCompareData(null);
+    setCompareError(null);
+    setCompareLoading(true);
+    try {
+      const result = await compareDocuments(
+        fileA,
+        fileB,
+        focus,
+        targetConversationId,
+      );
+      if (
+        compareRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setCompareData(result);
+      }
+    } catch (err: unknown) {
+      if (
+        compareRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setCompareError(
+          getErrorMessage(err, 'Could not compare the selected documents.'),
+        );
+      }
+    } finally {
+      if (compareRequestIdRef.current === requestId) {
+        setCompareLoading(false);
+      }
+    }
+  };
+
+  const handleCloseCompare = () => {
+    compareRequestIdRef.current += 1;
+    setCompareOpen(false);
+    setCompareLoading(false);
+  };
+
+  const handleAnalysisPreset = (preset: (typeof ANALYSIS_PRESETS)[number]) => {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === activeConversationId && file.status === 'completed',
+      )
+    ) {
+      setSuggestionNotice(
+        `Upload a document first, then tap “${preset.label}” to run this analysis.`
+      );
+      return;
+    }
+
+    setSuggestionNotice(null);
+    if (preset.isQuiz) {
+      handleOpenQuiz();
+      return;
+    }
+    if (preset.isCompare) {
+      handleOpenCompare();
+      return;
+    }
+    if (preset.isMindMap) {
+      void handleGenerateMindMap();
+    } else {
+      void handleSendQuery(undefined, preset.prompt);
+    }
+  };
+
   /* Query */
   const handleSendQuery = async (e?: React.FormEvent, presetQuery?: string) => {
     if (e) e.preventDefault();
@@ -1128,14 +1518,103 @@ export default function Home() {
     // retrieval on the chat id, so the answer must come from the vectors of
     // the conversation the message was actually sent in.
     const targetConversationId = activeConversationId;
+    const answerIndex = messages.length + 1;
 
     setQuery('');
     setPendingAttachments([]);
-    setMessagesForActive((prev) => [
-      ...prev,
-      { sender: 'user', text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
-    ]);
+    setMessagesForActive((prev) => {
+      const next = [
+        ...prev,
+        { sender: 'user' as const, text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
+      ];
+      if (STREAMING_ENABLED) {
+        next.push({
+          sender: 'agent',
+          text: '',
+          sources: [],
+          streaming: true,
+        });
+      }
+      return next;
+    });
     setLoading(true);
+
+    if (STREAMING_ENABLED) {
+      const controller = new AbortController();
+      streamControllerRef.current = controller;
+      setStreaming(true);
+      const updateStreamMessage = (update: (message: Message) => Message) => {
+        setMessagesForActive((previous) => {
+          const current = previous[answerIndex];
+          if (!current || current.sender !== 'agent') return previous;
+          const next = [...previous];
+          next[answerIndex] = update(current);
+          return next;
+        });
+      };
+
+      try {
+        await streamQueryDocument(
+          userText,
+          targetConversationId,
+          true,
+          controller.signal,
+          (event: QueryStreamEvent) => {
+            if (event.event === 'meta') {
+              updateStreamMessage((message) => ({
+                ...message,
+                sources: event.data.sources,
+              }));
+            } else if (event.event === 'token') {
+              updateStreamMessage((message) => ({
+                ...message,
+                text: message.text + event.data.text,
+              }));
+            } else if (event.event === 'done') {
+              updateStreamMessage((message) => ({
+                ...message,
+                text: event.data.answer,
+                sources: event.data.sources,
+                debug: event.data.debug,
+                streaming: false,
+                interrupted: false,
+                streamError: undefined,
+              }));
+            } else {
+              updateStreamMessage((message) => ({
+                ...message,
+                text: event.data.streamed
+                  ? message.text
+                  : `Error processing your request: ${event.data.message}`,
+                streaming: false,
+                interrupted: event.data.streamed,
+                streamError: event.data.message,
+              }));
+            }
+          },
+        );
+      } catch (err: unknown) {
+        const message = getErrorMessage(err, 'Could not generate an answer.');
+        updateStreamMessage((current) => ({
+          ...current,
+          text: controller.signal.aborted
+            ? current.text || 'Request stopped.'
+            : current.text || `Error processing your request: ${message}`,
+          streaming: false,
+          interrupted: controller.signal.aborted && Boolean(current.text),
+          streamError: controller.signal.aborted
+            ? 'Answer interrupted. Retry to generate it again.'
+            : message,
+        }));
+      } finally {
+        if (streamControllerRef.current === controller) {
+          streamControllerRef.current = null;
+          setStreaming(false);
+          setLoading(false);
+        }
+      }
+      return;
+    }
 
     try {
       // No `source` filter is passed, so the backend searches across every
@@ -1158,6 +1637,45 @@ export default function Home() {
       ]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleStopStreaming = () => {
+    streamControllerRef.current?.abort();
+  };
+
+  const handleSuggestQuestions = async (index: number, answerText: string) => {
+    const previousQuestion = messages
+      .slice(0, index)
+      .reverse()
+      .find((message) => message.sender === 'user')?.text;
+    if (!previousQuestion) return;
+
+    const updateMessage = (changes: Partial<Message>) => {
+      setMessagesForActive((previous) => {
+        const target = previous[index];
+        if (!target || target.sender !== 'agent' || target.text !== answerText) {
+          return previous;
+        }
+        const next = [...previous];
+        next[index] = { ...target, ...changes };
+        return next;
+      });
+    };
+
+    updateMessage({ followupsLoading: true, followupsError: undefined });
+    try {
+      const result = await generateFollowups(previousQuestion, activeConversationId);
+      updateMessage({
+        followups: result.questions,
+        followupsLoading: false,
+        followupsError: undefined,
+      });
+    } catch (err: unknown) {
+      updateMessage({
+        followupsLoading: false,
+        followupsError: getErrorMessage(err, 'Could not suggest questions.'),
+      });
     }
   };
 
@@ -1276,18 +1794,40 @@ export default function Home() {
      own UI uses. `copiedIndex` is cleared automatically after a short delay. */
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [savedArtifacts, setSavedArtifacts] = useState<SavedArtifact[]>([]);
+  const [printExport, setPrintExport] = useState<ExportDocument | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem('docagent_artifacts');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) setSavedArtifacts(parsed);
+    const frame = window.requestAnimationFrame(() => {
+      try {
+        const stored = window.localStorage.getItem('docagent_artifacts');
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) setSavedArtifacts(parsed);
+        }
+      } catch {
+        // Local storage is optional; the download action still works without it.
       }
-    } catch {
-      // Local storage is optional; the download action still works without it.
-    }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
+
+  useEffect(() => {
+    if (!printExport) return;
+    const previousTitle = window.document.title;
+    const restorePrintState = () => {
+      window.document.title = previousTitle;
+      setPrintExport(null);
+    };
+    window.document.title = printExport.fileName;
+    window.addEventListener('afterprint', restorePrintState, { once: true });
+    const frame = window.requestAnimationFrame(() => window.print());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('afterprint', restorePrintState);
+      window.document.title = previousTitle;
+    };
+  }, [printExport]);
 
   const handleSaveArtifact = (index: number, message: Message) => {
     if (message.sender !== 'agent') return;
@@ -1298,7 +1838,7 @@ export default function Home() {
     });
     const markdown = `# ${title}\n\n${message.text}${sourceLines.length ? `\n\n## Sources\n\n${sourceLines.join('\n')}` : ''}\n`;
     const artifact: SavedArtifact = {
-      id: `${Date.now()}_${index}`,
+      id: `${activeConversationId}_${index}_${savedArtifacts.length}`,
       title,
       text: markdown,
       createdAt: new Date().toISOString(),
@@ -1323,6 +1863,73 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
+  const handleExport = async (format: ExportFormat, answerIndex?: number) => {
+    const makeEntry = (
+      question: string,
+      answer: Message,
+      index: number,
+    ): ExportEntry => {
+      const evidenceIsOpen = openEvidence.has(`${activeConversationId}:${index}`);
+      return {
+        question,
+        answer: answer.text,
+        sources: answer.sources ?? [],
+        ...(evidenceIsOpen && answer.debug
+          ? { evidence: answer.debug.chunks.map((chunk) => chunk.text) }
+          : {}),
+      };
+    };
+
+    let entries: ExportEntry[];
+    if (answerIndex !== undefined) {
+      const answer = messages[answerIndex];
+      const question = messages
+        .slice(0, answerIndex)
+        .reverse()
+        .find((message) => message.sender === 'user')?.text;
+      entries =
+        answer?.sender === 'agent' && question
+          ? [makeEntry(question, answer, answerIndex)]
+          : [];
+    } else {
+      entries = [];
+      let question = '';
+      messages.forEach((message, index) => {
+        if (message.sender === 'user') {
+          question = message.text;
+        } else if (question) {
+          entries.push(makeEntry(question, message, index));
+          question = '';
+        }
+      });
+    }
+
+    if (!entries.length) {
+      setExportError('There are no answered questions to export yet.');
+      return;
+    }
+    setExportError(null);
+    const firstQuestion = entries[0].question;
+    const content: ExportDocument = {
+      title: firstQuestion,
+      fileName: sanitizeExportFilename(firstQuestion),
+      entries,
+    };
+
+    try {
+      if (mindMapData && mindMapConversationId === activeConversationId) {
+        content.mindMapImage = await createMindMapImage(mindMapData);
+      }
+      if (format === 'docx') {
+        await downloadWordDocument(content);
+      } else {
+        setPrintExport(content);
+      }
+    } catch (err: unknown) {
+      setExportError(getErrorMessage(err, 'Could not create the export.'));
+    }
+  };
+
   const handleCopy = async (index: number, text: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -1339,6 +1946,10 @@ export default function Home() {
      history list, rather than wiping the current one. History is session-only
      by design: it lives in component state and is gone on reload. */
   const handleNewChat = () => {
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    setStreaming(false);
+    setLoading(false);
     const newConversation: Conversation = {
       id: makeConversationId(),
       title: 'New Chat',
@@ -1363,6 +1974,10 @@ export default function Home() {
 
   const handleSwitchConversation = (id: string) => {
     if (id === activeConversationId) return;
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    setStreaming(false);
+    setLoading(false);
     setActiveConversationId(id);
     setEditingIndex(null);
     setEditText('');
@@ -1423,10 +2038,11 @@ export default function Home() {
     ).map((match) => match[1]);
     return getDeduplicatedSources(sources).filter((source) => {
       const page = source.page ? String(source.page) : '';
-      if (page && pageCitations.includes(page)) return true;
-      if (page) return false;
       const sourceName = (source.source || '').toLowerCase();
-      return Boolean(sourceName && normalizedAnswer.includes(sourceName));
+      const sourceMentioned = Boolean(sourceName && normalizedAnswer.includes(sourceName));
+      if (page && pageCitations.includes(page)) return true;
+      if (page && pageCitations.length > 0) return false;
+      return sourceMentioned;
     });
   };
 
@@ -1434,14 +2050,22 @@ export default function Home() {
     `${((milliseconds || 0) / 1000).toFixed(1)}s`;
 
   const isEmptyChat = messages.length === 0;
-  const hasIndexedDocuments = ingestedFiles.some((file) => file.status === 'completed');
+  const activeChatFiles = ingestedFiles.filter(
+    (file) => file.chatId === activeConversationId,
+  );
+  const hasIndexedDocuments = activeChatFiles.some(
+    (file) => file.status === 'completed',
+  );
 
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
     // which one won depended on Tailwind's output order rather than intent.
     // `h-dvh` alone is what was wanted: the dynamic viewport height that
     // accounts for mobile browser chrome.
-    <div className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200">
+    <div
+      id="docagent-app"
+      className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200"
+    >
       {/* Hidden File Input */}
       <input
         ref={fileInputRef}
@@ -1737,7 +2361,15 @@ export default function Home() {
         </div>
 
         {/* ── Chat messages area ── */}
-        <div className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}>
+        <div
+          ref={messagesContainerRef}
+          onScroll={(event) => {
+            const element = event.currentTarget;
+            shouldAutoScrollRef.current =
+              element.scrollHeight - element.scrollTop - element.clientHeight < 100;
+          }}
+          className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}
+        >
 
           {/* Empty state hero — a quiet, personal welcome rather than a
               feature-card grid. The greeting varies with time of day, the
@@ -1755,37 +2387,37 @@ export default function Home() {
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
                 {greetingSubtext}
               </p>
-              <div className="w-full max-w-2xl px-4 mb-5 text-left">
+              <div className="w-full max-w-2xl px-4 mb-4 text-left">
                 <div className="flex items-center justify-between mb-2 px-1">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600 dark:text-slate-400">
                     Start with an analysis
                   </span>
                   {!hasIndexedDocuments && (
-                    <span className="text-[11px] text-slate-400 dark:text-slate-600">Upload a document first</span>
+                    <span className="text-[11px] text-slate-600 dark:text-slate-400">Choose an analysis to get started</span>
                   )}
                 </div>
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                  {ANALYSIS_PRESETS.map((preset) => {
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {visibleAnalysisPresets.map((preset) => {
                     const Icon = preset.icon;
                     return (
                       <button
                         key={preset.label}
                         type="button"
-                        disabled={(!hasIndexedDocuments && !preset.isMindMap) || loading}
-                        onClick={() =>
-                          preset.isMindMap
-                            ? void handleGenerateMindMap()
-                            : void handleSendQuery(undefined, preset.prompt)
-                        }
-                        className="min-h-[88px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 px-3 py-3 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 disabled:cursor-not-allowed disabled:opacity-45"
+                        onClick={() => handleAnalysisPreset(preset)}
+                        className="min-h-[64px] rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-2 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                       >
-                        <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mb-2" />
-                        <span className="block text-xs font-semibold text-slate-800 dark:text-slate-200">{preset.label}</span>
-                        <span className="block mt-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500">{preset.hint}</span>
+                        <Icon className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 mb-1" />
+                        <span className="block text-[11px] font-semibold text-slate-900 dark:text-slate-100 leading-tight">{preset.label}</span>
+                        <span className="mt-0.5 block text-[9px] leading-snug text-slate-600 dark:text-slate-400">{preset.hint}</span>
                       </button>
                     );
                   })}
                 </div>
+                {suggestionNotice && (
+                  <p role="status" aria-live="polite" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                    {suggestionNotice}
+                  </p>
+                )}
               </div>
               <div className="w-full max-w-2xl px-4">
                 <ChatComposer
@@ -1798,7 +2430,7 @@ export default function Home() {
                   listening={listening}
                   pendingAttachments={pendingAttachments}
                   setPendingAttachments={setPendingAttachments}
-                  ingestedFiles={ingestedFiles}
+                  ingestedFiles={activeChatFiles}
                   handleRetryIngest={handleRetryIngest}
                   floating
                 />
@@ -1816,8 +2448,59 @@ export default function Home() {
             const isUser = msg.sender === 'user';
             const isEditing = editingIndex === index;
             const citedSources = getCitedSources(msg.text, msg.sources);
+            const displaySources =
+              msg.streaming && msg.sources?.length ? msg.sources : citedSources;
+            const markdownText = isUser
+              ? msg.text
+              : linkInlineCitations(msg.text, citedSources);
             const evidenceKey = `${activeConversationId}:${index}`;
             const evidenceIsOpen = openEvidence.has(evidenceKey);
+            const RenderMarkdownLink = (props: React.ComponentProps<'a'>) => {
+              const { href, children } = props;
+              const citationMatch =
+                typeof href === 'string' ? href.match(/^docagent-citation:(\d+)$/) : null;
+              const source = citationMatch
+                ? citedSources[Number(citationMatch[1])]
+                : undefined;
+              if (source?.source) {
+                const canOpen = activeChatFiles.some(
+                  (file) => file.name === source.source && file.file,
+                );
+                return (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      canOpen &&
+                      openFileViewer(
+                        source.source || '',
+                        source.page,
+                        source.location,
+                        getSourceExcerpt(msg.debug, source),
+                      )
+                    }
+                    disabled={!canOpen}
+                    className="text-indigo-600 underline decoration-indigo-400 underline-offset-2 dark:text-indigo-400"
+                    title={
+                      canOpen
+                        ? `Open ${source.source} at ${source.page ? `page ${source.page}` : source.location || 'the cited location'}`
+                        : source.source
+                    }
+                  >
+                    {children}
+                  </button>
+                );
+              }
+              return (
+                <a
+                  {...props}
+                  className="text-indigo-600 dark:text-indigo-400 underline"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {children}
+                </a>
+              );
+            };
 
             return (
               <div
@@ -1936,18 +2619,23 @@ export default function Home() {
                                   },
                                 },
                                 hr: { props: { className: 'my-3 border-slate-200 dark:border-slate-700' } },
-                                a: {
-                                  props: {
-                                    className: 'text-indigo-600 dark:text-indigo-400 underline',
-                                    target: '_blank',
-                                    rel: 'noopener noreferrer',
-                                  },
-                                },
+                                a: { component: RenderMarkdownLink },
                               },
                             }}
                           >
-                            {msg.text}
+                            {markdownText}
                           </Markdown>
+                          {msg.streaming && (
+                            <span
+                              aria-label="Answer streaming"
+                              className="ml-1 inline-block h-4 animate-pulse border-l-2 border-indigo-500 align-middle"
+                            />
+                          )}
+                          {msg.interrupted && (
+                            <p role="status" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                              Answer interrupted. Retry to generate it again.
+                            </p>
+                          )}
                         </div>
                       )}
 
@@ -1957,27 +2645,35 @@ export default function Home() {
                           <div className="font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
                             <span>Sources cited in this answer</span>
                             <span className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
-                              ({citedSources.length})
+                              ({displaySources.length})
                             </span>
                           </div>
 
-                          {citedSources.length === 0 ? (
+                          {displaySources.length === 0 ? (
                             <p className="text-slate-500 dark:text-slate-400">
                               No supporting passages cited
                             </p>
                           ) : (
                             <div className="flex flex-wrap gap-1.5">
-                            {citedSources.map((src, srcIndex) => {
+                            {displaySources.map((src, srcIndex) => {
                               const isVisual = src.chunk_type === 'visual';
-                              const pageText = src.page ? `Page ${src.page}` : '';
+                              const pageText = src.page
+                                ? `Page ${src.page}`
+                                : src.location || '';
                               const sourceName = src.source || 'Document';
-                              const canOpen = ingestedFiles.some((f) => f.name === sourceName && f.file);
+                              const canOpen = activeChatFiles.some(
+                                (file) => file.name === sourceName && file.file,
+                              );
+                              const excerpt = getSourceExcerpt(msg.debug, src);
 
                               return (
                                 <button
                                   key={srcIndex}
                                   type="button"
-                                  onClick={() => canOpen && openFileViewer(sourceName, src.page)}
+                                  onClick={() =>
+                                    canOpen &&
+                                    openFileViewer(sourceName, src.page, src.location, excerpt)
+                                  }
                                   disabled={!canOpen}
                                   className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs font-mono transition shadow-sm ${
                                     !canOpen ? 'cursor-default opacity-90' : 'cursor-pointer hover:shadow-md hover:-translate-y-px'
@@ -2110,6 +2806,47 @@ export default function Home() {
                     </div>
                   )}
 
+                  {!isUser && index > 0 && msg.text.trim() !== REFUSAL_ANSWER && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      {msg.followups ? (
+                        msg.followups.map((suggestion, suggestionIndex) => (
+                          <button
+                            key={`${index}-${suggestionIndex}`}
+                            type="button"
+                            onClick={() => void handleSendQuery(undefined, suggestion)}
+                            disabled={loading}
+                            className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-left text-xs text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-500/30 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950/70"
+                          >
+                            {suggestion}
+                          </button>
+                        ))
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void handleSuggestQuestions(index, msg.text)}
+                          disabled={msg.followupsLoading || loading}
+                          className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300"
+                        >
+                          {msg.followupsLoading ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <MessageSquarePlus className="h-3.5 w-3.5" />
+                          )}
+                          {msg.followupsLoading
+                            ? 'Suggesting…'
+                            : msg.followupsError
+                              ? 'Retry suggestions'
+                              : 'Suggest questions'}
+                        </button>
+                      )}
+                      {msg.followupsError && (
+                        <p role="status" className="basis-full text-xs text-rose-600 dark:text-rose-400">
+                          {msg.followupsError}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   {/* Action row — icon-only buttons that fade in on hover
                       on devices that actually have a mouse (`can-hover:`),
                       and stay permanently visible on touch devices, since
@@ -2166,6 +2903,14 @@ export default function Home() {
                       )}
 
                       {!isUser && (
+                        <ExportMenu
+                          label="Export this answer"
+                          disabled={loading}
+                          onExport={(format) => void handleExport(format, index)}
+                        />
+                      )}
+
+                      {!isUser && (
                         <button
                           type="button"
                           onClick={() => handleSaveArtifact(index, msg)}
@@ -2203,9 +2948,18 @@ export default function Home() {
               <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl rounded-tl-none flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 shadow-sm">
                 <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
                 <span className="hidden sm:inline">
-                  Retrieving document chunks & generating answer with Gemini...
+                  Searching your documents and preparing an answer...
                 </span>
                 <span className="sm:hidden">Generating answer...</span>
+                {streaming && (
+                  <button
+                    type="button"
+                    onClick={handleStopStreaming}
+                    className="ml-1 rounded-md border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    Stop
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -2222,6 +2976,15 @@ export default function Home() {
         {!isEmptyChat && (
           <div className="px-3 sm:px-4 lg:px-6 pb-3 sm:pb-4 lg:pb-5 pt-2 shrink-0">
             <div className="max-w-4xl mx-auto">
+              {messages.some((message) => message.sender === 'user') && (
+                <div className="mb-2 flex justify-end">
+                  <ExportMenu
+                    label="Export chat"
+                    disabled={loading}
+                    onExport={(format) => void handleExport(format)}
+                  />
+                </div>
+              )}
               <ChatComposer
                 query={query}
                 setQuery={setQuery}
@@ -2232,7 +2995,7 @@ export default function Home() {
                 listening={listening}
                 pendingAttachments={pendingAttachments}
                 setPendingAttachments={setPendingAttachments}
-                ingestedFiles={ingestedFiles}
+                ingestedFiles={activeChatFiles}
                 handleRetryIngest={handleRetryIngest}
               />
             </div>
@@ -2280,30 +3043,43 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Citation banner — a plain <iframe>'s native PDF viewer can be
-              told which page to jump to (via the URL hash below) but not
-              told to highlight text inside the document itself, so this
-              banner names the cited page as the closest achievable stand-in. */}
-          {viewerPage && (
+          {(viewerPage || viewerLocation) && (
             <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
               <Search className="w-3.5 h-3.5 shrink-0" />
-              <span>Cited from page {viewerPage} — jumped there below.</span>
+              <span>
+                Cited from {viewerPage ? `page ${viewerPage}` : viewerLocation} — showing the
+                relevant passage below when available.
+              </span>
             </div>
           )}
 
           <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
             {viewerFile && !viewerFile.toLowerCase().endsWith('.pdf') ? (
-              <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
-                <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  In-app preview isn&apos;t available for this file type yet.
-                </p>
-                <p className="text-xs text-slate-400 dark:text-slate-600">
-                  {viewerFile}
-                </p>
-              </div>
+              viewerText ? (
+                <div className="h-full overflow-y-auto p-4">
+                  <p className="mb-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    Extracted text{viewerLocation ? ` · ${viewerLocation}` : ''}
+                  </p>
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                    {viewerText}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
+                  <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Native preview isn&apos;t available for this file type, and no extracted
+                    passage is attached to this citation.
+                  </p>
+                  <p className="text-xs text-slate-400 dark:text-slate-600">{viewerFile}</p>
+                </div>
+              )
             ) : viewerUrl ? (
-              <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
+              <PdfPreview
+                key={`${viewerUrl}:${viewerPage ?? 0}`}
+                fileUrl={viewerUrl}
+                initialPage={viewerPage}
+              />
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
                 Couldn&apos;t load this file for preview.
@@ -2320,6 +3096,8 @@ export default function Home() {
           viewerFile={viewerFile}
           viewerUrl={viewerUrl}
           viewerPage={viewerPage}
+          viewerLocation={viewerLocation}
+          viewerText={viewerText}
           onClose={closeFileViewer}
         />
       )}
@@ -2334,6 +3112,99 @@ export default function Home() {
           onRetry={() => void handleGenerateMindMap(mindMapTopic)}
           onRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
         />
+      )}
+
+      {quizOpen && quizConversationId === activeConversationId && (
+        <QuizPanel
+          key={`${quizConversationId}-${quizPanelVersion}`}
+          data={quizData}
+          loading={quizLoading}
+          error={quizError}
+          onClose={handleCloseQuiz}
+          onGenerate={handleGenerateQuiz}
+        />
+      )}
+
+      {compareOpen && compareConversationId === activeConversationId && (
+        <ComparePanel
+          files={[
+            ...new Set(
+              activeChatFiles
+                .filter((file) => file.status === 'completed')
+                .map((file) => file.name),
+            ),
+          ]}
+          data={compareData}
+          loading={compareLoading}
+          error={compareError}
+          onClose={handleCloseCompare}
+          onCompare={handleCompareDocuments}
+        />
+      )}
+
+      {printExport && (
+        <article id="document-export-print" aria-hidden="true">
+          <h1>{printExport.title}</h1>
+          {printExport.entries.map((entry, index) => (
+            <section key={`${index}-${entry.question}`}>
+              <h2>Question {index + 1}</h2>
+              <p>{entry.question}</p>
+              <h3>Answer</h3>
+              <p className="export-preserve-lines">{entry.answer}</p>
+              {entry.sources.length > 0 && (
+                <>
+                  <h3>Sources</h3>
+                  <ul>
+                    {entry.sources.map((source, sourceIndex) => (
+                      <li key={`${source.source}-${sourceIndex}`}>
+                        {source.source || 'Document'} (
+                        {source.page ? `page ${source.page}` : source.location || 'document'})
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {entry.evidence && entry.evidence.length > 0 && (
+                <>
+                  <h3>Retrieved evidence</h3>
+                  {entry.evidence.map((text, evidenceIndex) => (
+                    <p className="export-preserve-lines" key={evidenceIndex}>
+                      {text}
+                    </p>
+                  ))}
+                </>
+              )}
+            </section>
+          ))}
+          {printExport.mindMapImage && (
+            <figure>
+              <h2>Mind map</h2>
+              <Image
+                src={printExport.mindMapImage.dataUrl}
+                alt="Generated document mind map"
+                width={printExport.mindMapImage.width}
+                height={printExport.mindMapImage.height}
+                unoptimized
+              />
+            </figure>
+          )}
+        </article>
+      )}
+      {exportError && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 z-[100] flex max-w-sm items-start gap-3 rounded-xl border border-rose-200 bg-white p-3 text-sm text-rose-700 shadow-xl dark:border-rose-900/70 dark:bg-slate-900 dark:text-rose-300"
+        >
+          <span>{exportError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss export error"
+            onClick={() => setExportError(null)}
+            className="ml-auto shrink-0 rounded px-1 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+          >
+            x
+          </button>
+        </div>
       )}
     </div>
   );

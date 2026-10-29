@@ -53,3 +53,45 @@ Gemini. **Pass count: 9/9.**
 - Legacy prompt: 6/9 pass; its refusal wording was not exact enough for rows 7–9.
 - Strict prompt: 9/9 pass; all three unanswerable questions used the exact refusal.
 - Automatic routing: 9/9 pass; Gemini quota exhaustion was handled by Groq fallback.
+
+## Mind-map API groundedness
+
+`python -m unittest eval.test_mindmap -v` passed all 7 endpoint tests. The
+Zorvania fixture test checks the generated labels against the document, rejects
+an unsupported "Paris" node, and verifies depth/node limits. Additional tests
+cover session/chat isolation, structured JSON repair, and bounded large-document
+map/reduce behavior.
+
+## Quiz API validation
+
+`python -m unittest eval.test_quiz -v` passed all 7 deterministic endpoint tests.
+The tests cover session/chat isolation, no-document errors, fenced and invalid
+JSON, four-option schema validation, exact requested question counts, rejection
+of an answer absent from the source text, and context limits on a large document.
+These tests use a fake LLM provider; they validate grounding enforcement and
+response behavior, not live-provider quiz quality.
+
+## Per-file comparison API validation
+
+`python -m unittest eval.test_compare -v` passed all 6 deterministic endpoint
+tests. They verify independent session-plus-file retrieval for both selected
+files, chat isolation, per-file context limits, citation-label validation,
+the fewer-than-two-files guard, and the two-call invalid-JSON repair limit.
+These tests use a fake LLM provider; they validate the endpoint contract and
+retrieval boundaries, not live-provider comparison quality.
+
+## Completed feature validation
+
+| Feature | Validation | Result / limitation |
+|---|---|---|
+| Mind maps | 7 API tests; grounding, schema, isolation, and bounds | Passed |
+| Citation navigation | Synthetic two-page PDF browser check | Page 2 opened for a page-2 citation; PDF text highlighting is not included |
+| Follow-up questions | 3 API tests and browser interaction checks | Lazy loading, selected-chip submission, and refusal omission verified |
+| Export | DOCX package generation and production build | Valid DOCX output; browser download/print dialog was not verified |
+| Streaming | 5 API tests; frontend lint/build; `/api/query` grounding 9/9 | Passed locally; Render buffering remains unverified, so streaming stays disabled by default |
+| Quiz and flashcards | 7 API tests; evidence-answer validation and large-context cap | Endpoint checks passed with a fake provider; live-provider quiz quality was not measured |
+| Compare documents | 6 API tests; per-file filters, isolation, citations, and context limits | Endpoint checks passed with a fake provider; browser interaction was not verified |
+
+Final local regression: `python -m unittest discover -s eval -p "test_*.py" -q`
+passed all 28 tests; `eval/run_grounding_test.py` passed 9/9; frontend
+`npm run lint` and `npm run build` both passed.
