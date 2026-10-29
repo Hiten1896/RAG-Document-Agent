@@ -11,11 +11,14 @@ import {
   STREAMING_ENABLED,
   generateFollowups,
   generateMindMap,
+  generateQuiz,
   clearSession,
   SourceMetadata,
   QueryDebug,
   MindMapResponse,
   QueryStreamEvent,
+  QuizDifficulty,
+  QuizResponse,
 } from '@/lib/api';
 import {
   createMindMapImage,
@@ -103,6 +106,10 @@ const MindMapPanel = dynamic(() => import('./MindMapPanel'), {
       Loading mind map…
     </div>
   ),
+});
+
+const QuizPanel = dynamic(() => import('./QuizPanel'), {
+  ssr: false,
 });
 
 /* ───── Types ───── */
@@ -263,6 +270,7 @@ const ANALYSIS_PRESETS = [
       'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
     icon: ClipboardList,
     isMindMap: false,
+    isQuiz: false,
   },
   {
     label: 'Mind map',
@@ -270,6 +278,15 @@ const ANALYSIS_PRESETS = [
     prompt: '',
     icon: GitBranch,
     isMindMap: true,
+    isQuiz: false,
+  },
+  {
+    label: 'Quiz me',
+    hint: 'Practice with document facts',
+    prompt: '',
+    icon: CheckCircle2,
+    isMindMap: false,
+    isQuiz: true,
   },
   {
     label: 'Key risks',
@@ -278,6 +295,7 @@ const ANALYSIS_PRESETS = [
       'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
     icon: ShieldAlert,
     isMindMap: false,
+    isQuiz: false,
   },
   {
     label: 'Action items',
@@ -286,6 +304,7 @@ const ANALYSIS_PRESETS = [
       'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
     icon: ListChecks,
     isMindMap: false,
+    isQuiz: false,
   },
   {
     label: 'Compare documents',
@@ -294,6 +313,7 @@ const ANALYSIS_PRESETS = [
       'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
     icon: GitCompareArrows,
     isMindMap: false,
+    isQuiz: false,
   },
   {
     label: 'Key terms',
@@ -302,6 +322,7 @@ const ANALYSIS_PRESETS = [
       'Create a concise glossary of important terms and concepts from the uploaded documents. Explain each in plain language and cite the supporting page or location.',
     icon: BookOpen,
     isMindMap: false,
+    isQuiz: false,
   },
   {
     label: 'Timeline',
@@ -310,6 +331,7 @@ const ANALYSIS_PRESETS = [
       'Build a chronological timeline of the important dates and events stated in the uploaded documents. Include the event and its supporting page or location, and do not infer dates.',
     icon: CalendarDays,
     isMindMap: false,
+    isQuiz: false,
   },
 ];
 
@@ -694,9 +716,17 @@ export default function Home() {
   const [mindMapError, setMindMapError] = useState<string | null>(null);
   const [mindMapTopic, setMindMapTopic] = useState('');
   const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
-  const [visibleAnalysisPresets, setVisibleAnalysisPresets] = useState(
-    ANALYSIS_PRESETS.slice(0, 4)
-  );
+  const [quizOpen, setQuizOpen] = useState(false);
+  const [quizData, setQuizData] = useState<QuizResponse | null>(null);
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizError, setQuizError] = useState<string | null>(null);
+  const [quizConversationId, setQuizConversationId] = useState(activeConversationId);
+  const [quizPanelVersion, setQuizPanelVersion] = useState(0);
+  const quizRequestIdRef = useRef(0);
+  const [visibleAnalysisPresets, setVisibleAnalysisPresets] = useState(() => [
+    ...ANALYSIS_PRESETS.filter((preset) => preset.isQuiz),
+    ...ANALYSIS_PRESETS.filter((preset) => !preset.isQuiz).slice(0, 3),
+  ]);
   const [suggestionNotice, setSuggestionNotice] = useState<string | null>(null);
 
   const openFileViewer = useCallback(
@@ -804,12 +834,16 @@ export default function Home() {
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      const shuffled = [...ANALYSIS_PRESETS];
+      const quizPreset = ANALYSIS_PRESETS.find((preset) => preset.isQuiz);
+      const shuffled = ANALYSIS_PRESETS.filter((preset) => !preset.isQuiz);
       for (let index = shuffled.length - 1; index > 0; index -= 1) {
         const swapIndex = Math.floor(Math.random() * (index + 1));
         [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
       }
-      const nextPresets = shuffled.slice(0, 4);
+      const nextPresets = [
+        ...(quizPreset ? [quizPreset] : []),
+        ...shuffled.slice(0, quizPreset ? 3 : 4),
+      ];
       setVisibleAnalysisPresets(nextPresets);
 
       try {
@@ -1281,6 +1315,59 @@ export default function Home() {
     }
   };
 
+  const handleOpenQuiz = () => {
+    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+      setSuggestionNotice('Upload a document first, then tap “Quiz me” to practice its facts.');
+      return;
+    }
+
+    setSuggestionNotice(null);
+    setQuizConversationId(activeConversationId);
+    setQuizData(null);
+    setQuizError(null);
+    setQuizOpen(true);
+  };
+
+  const handleGenerateQuiz = async (
+    count: number,
+    difficulty: QuizDifficulty,
+  ) => {
+    const targetConversationId = activeConversationId;
+    const requestId = quizRequestIdRef.current + 1;
+    quizRequestIdRef.current = requestId;
+    setQuizConversationId(targetConversationId);
+    setQuizData(null);
+    setQuizError(null);
+    setQuizLoading(true);
+    try {
+      const result = await generateQuiz(count, difficulty, targetConversationId);
+      if (
+        quizRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setQuizData(result);
+        setQuizPanelVersion((version) => version + 1);
+      }
+    } catch (err: unknown) {
+      if (
+        quizRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setQuizError(getErrorMessage(err, 'Could not generate the quiz.'));
+      }
+    } finally {
+      if (quizRequestIdRef.current === requestId) {
+        setQuizLoading(false);
+      }
+    }
+  };
+
+  const handleCloseQuiz = () => {
+    quizRequestIdRef.current += 1;
+    setQuizOpen(false);
+    setQuizLoading(false);
+  };
+
   const handleAnalysisPreset = (preset: (typeof ANALYSIS_PRESETS)[number]) => {
     if (!ingestedFiles.some((file) => file.status === 'completed')) {
       setSuggestionNotice(
@@ -1290,6 +1377,10 @@ export default function Home() {
     }
 
     setSuggestionNotice(null);
+    if (preset.isQuiz) {
+      handleOpenQuiz();
+      return;
+    }
     if (preset.isMindMap) {
       void handleGenerateMindMap();
     } else {
@@ -2896,6 +2987,17 @@ export default function Home() {
           onClose={() => setMindMapOpen(false)}
           onRetry={() => void handleGenerateMindMap(mindMapTopic)}
           onRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
+        />
+      )}
+
+      {quizOpen && quizConversationId === activeConversationId && (
+        <QuizPanel
+          key={`${quizConversationId}-${quizPanelVersion}`}
+          data={quizData}
+          loading={quizLoading}
+          error={quizError}
+          onClose={handleCloseQuiz}
+          onGenerate={handleGenerateQuiz}
         />
       )}
 

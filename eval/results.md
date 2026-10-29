@@ -53,3 +53,12 @@ Gemini. **Pass count: 9/9.**
 - Legacy prompt: 6/9 pass; its refusal wording was not exact enough for rows 7–9.
 - Strict prompt: 9/9 pass; all three unanswerable questions used the exact refusal.
 - Automatic routing: 9/9 pass; Gemini quota exhaustion was handled by Groq fallback.
+
+## Quiz API validation
+
+`python -m unittest eval.test_quiz -v` passed all 7 deterministic endpoint tests.
+The tests cover session/chat isolation, no-document errors, fenced and invalid
+JSON, four-option schema validation, exact requested question counts, rejection
+of an answer absent from the source text, and context limits on a large document.
+These tests use a fake LLM provider; they validate grounding enforcement and
+response behavior, not live-provider quiz quality.

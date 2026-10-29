@@ -174,6 +174,31 @@ export interface FollowupsResponse {
   };
 }
 
+export type QuizDifficulty = 'easy' | 'medium' | 'hard';
+
+export interface QuizQuestion {
+  question: string;
+  options: string[];
+  correct_answer: string;
+  explanation: string;
+  source: string;
+}
+
+export interface QuizResponse {
+  questions: QuizQuestion[];
+  debug?: {
+    chunks_used: number;
+    context_chars: number;
+    files: string[];
+    provider: string;
+    model: string;
+    retrieve_ms: number;
+    generation_ms: number;
+    total_ms: number;
+    llm_attempts: number;
+  };
+}
+
 export interface MindMapNode {
   title: string;
   source: string | null;
@@ -255,6 +280,7 @@ const INGEST_TIMEOUT_MS = 180_000;
 const QUERY_TIMEOUT_MS = 120_000;
 const FOLLOWUPS_TIMEOUT_MS = 60_000;
 const MINDMAP_TIMEOUT_MS = 120_000;
+const QUIZ_TIMEOUT_MS = 120_000;
 const CLEAR_TIMEOUT_MS = 15_000;
 
 function timeoutSignal(ms: number): AbortSignal | undefined {
@@ -521,6 +547,34 @@ export async function generateFollowups(
 
   if (!response.ok) {
     throw await parseErrorResponse(response, 'Failed to suggest follow-up questions.');
+  }
+
+  return response.json();
+}
+
+export async function generateQuiz(
+  count: number,
+  difficulty: QuizDifficulty,
+  chatId?: string,
+): Promise<QuizResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}/quiz`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...sessionHeaders(chatId),
+        'X-Debug': 'true',
+      },
+      body: JSON.stringify({ count, difficulty }),
+      signal: timeoutSignal(QUIZ_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Quiz generation timed out. Please try again.');
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response, 'Failed to generate a quiz.');
   }
 
   return response.json();

@@ -15,6 +15,12 @@ source labels on map nodes, and caps each request at four LLM calls. The browser
 renders maps with `markmap-lib` and `markmap-view`; maps can be fitted to the
 screen and downloaded as SVG or PNG.
 
+The **Quiz me** card generates up to ten document-grounded multiple-choice
+questions. It samples and caps the context, validates each correct answer and
+source against the selected chat's document text, and limits generation and
+JSON repair to two LLM calls. The same questions can be used in score-tracked
+quiz mode or as flip-style flashcards.
+
 Answer citations and source cards open the cited PDF page in the viewer. For
 DOCX, PPTX, XLSX, CSV, TXT, and Markdown files, the viewer shows the extracted
 passage and its page, slide, sheet, or document location when that text is
@@ -64,10 +70,11 @@ prompt.
 - `POST /api/query` retrieves chunks and generates an answer.
 - `POST /api/query/stream` streams grounded answers as Server-Sent Events; the existing `/api/query` remains unchanged.
 - `POST /api/followups` generates three document-grounded follow-up questions for a prior question.
+- `POST /api/quiz` generates 1–10 multiple-choice questions from the active chat's documents.
 - `POST /api/mindmap` generates a structured mind map from the active chat's documents.
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
-Use `X-Session-Id` and `X-Chat-Id` on ingest/query/stream/followups/mindmap. Add
+Use `X-Session-Id` and `X-Chat-Id` on ingest/query/stream/followups/quiz/mindmap. Add
 `X-Debug: true` to query responses to receive retrieved chunks, relevance scores, the exact
 prompt, provider/model, routing attempts, and any Groq context trimming. Mind
 map responses include provider/model, chunk count, cache status, and timings
@@ -76,6 +83,9 @@ an answer to request three questions grounded in fresh retrieval results. Its
 optional debug response includes the provider/model, retrieved chunk count, and
 timings. The frontend's Show evidence panel renders query information,
 including `Answered by provider / model`.
+Quiz requests sample at most 10 chunks and cap document context at 10,000
+characters; `count` is limited to 10 and `difficulty` accepts `easy`, `medium`,
+or `hard`. `X-Debug: true` returns sampling, provider, and timing details.
 Query sources carry a numeric `page` where available and a `location` label for
 slides, sheets, or unpaginated text; the frontend uses these fields for citation
 navigation.

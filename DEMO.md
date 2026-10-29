@@ -25,7 +25,9 @@
    `NEXT_PUBLIC_ENABLE_STREAMING=true`, ask a question and show tokens arriving,
    the Stop control, and the final evidence panel. Otherwise the standard
    non-streaming query remains the default.
-11. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
+11. Click **Quiz me**, select a question count and difficulty, answer questions
+    to see the score and source, then switch to flashcards and flip a card.
+12. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
    no-context comparison results.
 
 Uploads are held in an in-memory ChromaDB collection and are lost when the
