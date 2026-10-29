@@ -34,10 +34,6 @@ import {
   PanelLeftOpen,
   MoreHorizontal,
   Trash2,
-  ChevronLeft,
-  ChevronRight,
-  ZoomIn,
-  ZoomOut,
   RefreshCw,
   Copy,
   Check,
@@ -45,6 +41,8 @@ import {
   ShieldAlert,
   ListChecks,
   GitCompareArrows,
+  BookOpen,
+  CalendarDays,
   Download,
   BookmarkCheck,
   GitBranch,
@@ -200,6 +198,22 @@ const ANALYSIS_PRESETS = [
     prompt:
       'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
     icon: GitCompareArrows,
+    isMindMap: false,
+  },
+  {
+    label: 'Key terms',
+    hint: 'Define important concepts',
+    prompt:
+      'Create a concise glossary of important terms and concepts from the uploaded documents. Explain each in plain language and cite the supporting page or location.',
+    icon: BookOpen,
+    isMindMap: false,
+  },
+  {
+    label: 'Timeline',
+    hint: 'Important dates and events',
+    prompt:
+      'Build a chronological timeline of the important dates and events stated in the uploaded documents. Include the event and its supporting page or location, and do not infer dates.',
+    icon: CalendarDays,
     isMindMap: false,
   },
 ];
@@ -442,7 +456,6 @@ function ChatComposer({
 export default function Home() {
   /* Upload state — multiple files can now be ingested and queried together */
   const [ingestedFiles, setIngestedFiles] = useState<IngestedFile[]>([]);
-  const [uploading, setUploading] = useState(false);
 
   /* Chat history — session-only (kept in memory, never persisted), so a
      reload intentionally starts clean. Each conversation is independent;
@@ -508,6 +521,10 @@ export default function Home() {
   const [mindMapError, setMindMapError] = useState<string | null>(null);
   const [mindMapTopic, setMindMapTopic] = useState('');
   const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
+  const [visibleAnalysisPresets, setVisibleAnalysisPresets] = useState(
+    ANALYSIS_PRESETS.slice(0, 4)
+  );
+  const [suggestionNotice, setSuggestionNotice] = useState<string | null>(null);
 
   const openFileViewer = useCallback(
     (fname: string, page?: number) => {
@@ -657,6 +674,28 @@ export default function Home() {
     const pick = pool[nextIndex];
     setGreeting(pick.headline);
     setGreetingSubtext(pick.subtext);
+  }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const shuffled = [...ANALYSIS_PRESETS];
+      for (let index = shuffled.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+      }
+      const nextPresets = shuffled.slice(0, 4);
+      setVisibleAnalysisPresets(nextPresets);
+
+      try {
+        window.localStorage.setItem(
+          'docagent_analysis_presets',
+          JSON.stringify(nextPresets.map((preset) => preset.label))
+        );
+      } catch {
+        // A reload is still randomized even without localStorage.
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, []);
 
   /* Chat state */
@@ -1023,9 +1062,7 @@ export default function Home() {
     if (!newFiles.length) return;
 
     setSidebarOpen(false);
-    setUploading(true);
     await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
-    setUploading(false);
   };
 
   const triggerAutoIngest = async (fileToIngest: File) => {
@@ -1112,6 +1149,22 @@ export default function Home() {
       if (activeConversationId === targetConversationId) {
         setMindMapLoading(false);
       }
+    }
+  };
+
+  const handleAnalysisPreset = (preset: (typeof ANALYSIS_PRESETS)[number]) => {
+    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+      setSuggestionNotice(
+        `Upload a document first, then tap “${preset.label}” to run this analysis.`
+      );
+      return;
+    }
+
+    setSuggestionNotice(null);
+    if (preset.isMindMap) {
+      void handleGenerateMindMap();
+    } else {
+      void handleSendQuery(undefined, preset.prompt);
     }
   };
 
@@ -1755,37 +1808,37 @@ export default function Home() {
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
                 {greetingSubtext}
               </p>
-              <div className="w-full max-w-2xl px-4 mb-5 text-left">
+              <div className="w-full max-w-2xl px-4 mb-4 text-left">
                 <div className="flex items-center justify-between mb-2 px-1">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600 dark:text-slate-400">
                     Start with an analysis
                   </span>
                   {!hasIndexedDocuments && (
-                    <span className="text-[11px] text-slate-400 dark:text-slate-600">Upload a document first</span>
+                    <span className="text-[11px] text-slate-600 dark:text-slate-400">Choose an analysis to get started</span>
                   )}
                 </div>
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                  {ANALYSIS_PRESETS.map((preset) => {
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {visibleAnalysisPresets.map((preset) => {
                     const Icon = preset.icon;
                     return (
                       <button
                         key={preset.label}
                         type="button"
-                        disabled={(!hasIndexedDocuments && !preset.isMindMap) || loading}
-                        onClick={() =>
-                          preset.isMindMap
-                            ? void handleGenerateMindMap()
-                            : void handleSendQuery(undefined, preset.prompt)
-                        }
-                        className="min-h-[88px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 px-3 py-3 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 disabled:cursor-not-allowed disabled:opacity-45"
+                        onClick={() => handleAnalysisPreset(preset)}
+                        className="min-h-[64px] rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-2 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                       >
-                        <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mb-2" />
-                        <span className="block text-xs font-semibold text-slate-800 dark:text-slate-200">{preset.label}</span>
-                        <span className="block mt-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500">{preset.hint}</span>
+                        <Icon className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 mb-1" />
+                        <span className="block text-[11px] font-semibold text-slate-900 dark:text-slate-100 leading-tight">{preset.label}</span>
+                        <span className="mt-0.5 block text-[9px] leading-snug text-slate-600 dark:text-slate-400">{preset.hint}</span>
                       </button>
                     );
                   })}
                 </div>
+                {suggestionNotice && (
+                  <p role="status" aria-live="polite" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                    {suggestionNotice}
+                  </p>
+                )}
               </div>
               <div className="w-full max-w-2xl px-4">
                 <ChatComposer
@@ -2203,7 +2256,7 @@ export default function Home() {
               <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl rounded-tl-none flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 shadow-sm">
                 <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
                 <span className="hidden sm:inline">
-                  Retrieving document chunks & generating answer with Gemini...
+                  Searching your documents and preparing an answer...
                 </span>
                 <span className="sm:hidden">Generating answer...</span>
               </div>
@@ -2303,7 +2356,11 @@ export default function Home() {
                 </p>
               </div>
             ) : viewerUrl ? (
-              <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
+              <PdfPreview
+                key={`${viewerUrl}:${viewerPage ?? 0}`}
+                fileUrl={viewerUrl}
+                initialPage={viewerPage}
+              />
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
                 Couldn&apos;t load this file for preview.
