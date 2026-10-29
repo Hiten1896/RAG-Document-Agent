@@ -30,8 +30,8 @@
 12. Upload two documents to the same chat, open **Compare documents**, select
    two file chips, and review the agreement/difference table with page sources.
    In a chat with fewer than two documents, show the upload-two-files message.
-13. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
-   no-context comparison results.
+13. Open `eval/results.md` and show the grounding results, feature-validation
+   table, and remaining Render/browser limitations.
 
 Uploads are held in an in-memory ChromaDB collection and are lost when the
 backend restarts.

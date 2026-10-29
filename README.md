@@ -9,6 +9,17 @@ Text is chunked and embedded through the remote Jina embeddings API. Retrieved
 chunks are stored in an in-memory ChromaDB collection, so uploads disappear when
 the backend restarts.
 
+### Supported features
+
+- Strict, document-grounded question answering with source evidence and refusal
+  for unsupported questions.
+- Interactive mind maps, citation navigation, and lazy follow-up suggestions.
+- Chat and answer export to Word or browser-generated PDF.
+- Optional token streaming; disabled by default until Render buffering is
+  verified.
+- Document-grounded quizzes and flashcards.
+- Per-file comparison of two documents in the active chat.
+
 The app can also generate a grounded, interactive mind map from all documents
 in the active chat. It samples document chunks across their locations, keeps
 source labels on map nodes, and caps each request at four LLM calls. The browser
