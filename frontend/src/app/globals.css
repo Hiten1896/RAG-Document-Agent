@@ -152,3 +152,80 @@ body {
     animation: fade-in 0.15s ease-out;
   }
 }
+
+#document-export-print {
+  display: none;
+}
+
+@media print {
+  @page {
+    margin: 18mm;
+  }
+
+  body > * {
+    display: none !important;
+  }
+
+  body > #docagent-app {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    position: static !important;
+  }
+
+  #docagent-app > * {
+    visibility: hidden !important;
+  }
+
+  #document-export-print,
+  #document-export-print * {
+    visibility: visible !important;
+  }
+
+  #document-export-print {
+    background: #fff !important;
+    color: #0f172a !important;
+    display: block !important;
+    font: 11pt/1.5 Arial, sans-serif;
+    height: auto !important;
+    margin: 0 auto;
+    overflow: visible !important;
+    padding: 0;
+    position: static !important;
+    width: 100% !important;
+  }
+
+  #document-export-print h1 {
+    font-size: 20pt;
+    margin: 0 0 18pt;
+    overflow-wrap: anywhere;
+  }
+
+  #document-export-print h2 {
+    font-size: 14pt;
+    margin: 18pt 0 6pt;
+  }
+
+  #document-export-print h3 {
+    font-size: 11pt;
+    margin: 12pt 0 4pt;
+  }
+
+  #document-export-print p,
+  #document-export-print li {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  #document-export-print section {
+    break-inside: auto;
+  }
+
+  #document-export-print img {
+    height: auto;
+    max-height: 250mm;
+    max-width: 100%;
+    width: auto;
+  }
+}

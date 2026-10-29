@@ -79,6 +79,15 @@ Mind maps are cached in memory per session, chat, document set, and topic; they
 are cleared with the chat and expire with its normal session cleanup. They need
 no additional environment variables or Python dependencies.
 
+## Export
+
+Use **Export chat** or **Export this answer** to save a conversation as a Word
+`.docx` file or open the browser's print dialog to save a PDF. Exports include
+questions, answers, and sources; retrieved evidence is included only when its
+Show evidence panel is open. An available mind map is rendered as a plain-text
+image and included in both formats. Word export uses the pinned `docx` package;
+PDF export uses the browser's built-in print-to-PDF support.
+
 Grounding behavior is verified by the fixtures and results in
 [eval/results.md](eval/results.md), using
 [eval/run_grounding_test.py](eval/run_grounding_test.py).

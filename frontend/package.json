@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "clsx": "^2.1.1",
+    "docx": "9.15.0",
     "lucide-react": "^1.33.0",
     "markdown-to-jsx": "^9.10.2",
     "markmap-lib": "0.18.12",

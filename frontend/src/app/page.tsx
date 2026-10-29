@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
 import dynamic from 'next/dynamic';
+import Image from 'next/image';
 import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
@@ -13,6 +14,13 @@ import {
   QueryDebug,
   MindMapResponse,
 } from '@/lib/api';
+import {
+  createMindMapImage,
+  downloadWordDocument,
+  ExportDocument,
+  ExportEntry,
+  sanitizeExportFilename,
+} from '@/lib/export';
 import {
   Send,
   FileText,
@@ -130,6 +138,54 @@ interface SavedArtifact {
   title: string;
   text: string;
   createdAt: string;
+}
+
+type ExportFormat = 'pdf' | 'docx';
+
+interface ExportMenuProps {
+  label: string;
+  disabled?: boolean;
+  onExport: (format: ExportFormat) => void;
+}
+
+function ExportMenu({ label, disabled = false, onExport }: ExportMenuProps) {
+  const chooseFormat = (
+    event: React.MouseEvent<HTMLButtonElement>,
+    format: ExportFormat,
+  ) => {
+    event.currentTarget.closest('details')?.removeAttribute('open');
+    onExport(format);
+  };
+
+  return (
+    <details className="group/export relative">
+      <summary
+        aria-label={label}
+        className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300"
+      >
+        <Download className="h-3.5 w-3.5" />
+        {label}
+      </summary>
+      <div className="absolute bottom-full left-0 z-30 mb-1 min-w-32 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={(event) => chooseFormat(event, 'pdf')}
+          className="block w-full rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          Save as PDF
+        </button>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={(event) => chooseFormat(event, 'docx')}
+          className="block w-full rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          Save as Word
+        </button>
+      </div>
+    </details>
+  );
 }
 
 interface SpeechRecognitionLike {
@@ -1425,6 +1481,8 @@ export default function Home() {
      own UI uses. `copiedIndex` is cleared automatically after a short delay. */
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const [savedArtifacts, setSavedArtifacts] = useState<SavedArtifact[]>([]);
+  const [printExport, setPrintExport] = useState<ExportDocument | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -1440,6 +1498,23 @@ export default function Home() {
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
+
+  useEffect(() => {
+    if (!printExport) return;
+    const previousTitle = window.document.title;
+    const restorePrintState = () => {
+      window.document.title = previousTitle;
+      setPrintExport(null);
+    };
+    window.document.title = printExport.fileName;
+    window.addEventListener('afterprint', restorePrintState, { once: true });
+    const frame = window.requestAnimationFrame(() => window.print());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('afterprint', restorePrintState);
+      window.document.title = previousTitle;
+    };
+  }, [printExport]);
 
   const handleSaveArtifact = (index: number, message: Message) => {
     if (message.sender !== 'agent') return;
@@ -1473,6 +1548,73 @@ export default function Home() {
     link.download = `${artifact.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}.md`;
     link.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleExport = async (format: ExportFormat, answerIndex?: number) => {
+    const makeEntry = (
+      question: string,
+      answer: Message,
+      index: number,
+    ): ExportEntry => {
+      const evidenceIsOpen = openEvidence.has(`${activeConversationId}:${index}`);
+      return {
+        question,
+        answer: answer.text,
+        sources: answer.sources ?? [],
+        ...(evidenceIsOpen && answer.debug
+          ? { evidence: answer.debug.chunks.map((chunk) => chunk.text) }
+          : {}),
+      };
+    };
+
+    let entries: ExportEntry[];
+    if (answerIndex !== undefined) {
+      const answer = messages[answerIndex];
+      const question = messages
+        .slice(0, answerIndex)
+        .reverse()
+        .find((message) => message.sender === 'user')?.text;
+      entries =
+        answer?.sender === 'agent' && question
+          ? [makeEntry(question, answer, answerIndex)]
+          : [];
+    } else {
+      entries = [];
+      let question = '';
+      messages.forEach((message, index) => {
+        if (message.sender === 'user') {
+          question = message.text;
+        } else if (question) {
+          entries.push(makeEntry(question, message, index));
+          question = '';
+        }
+      });
+    }
+
+    if (!entries.length) {
+      setExportError('There are no answered questions to export yet.');
+      return;
+    }
+    setExportError(null);
+    const firstQuestion = entries[0].question;
+    const content: ExportDocument = {
+      title: firstQuestion,
+      fileName: sanitizeExportFilename(firstQuestion),
+      entries,
+    };
+
+    try {
+      if (mindMapData && mindMapConversationId === activeConversationId) {
+        content.mindMapImage = await createMindMapImage(mindMapData);
+      }
+      if (format === 'docx') {
+        await downloadWordDocument(content);
+      } else {
+        setPrintExport(content);
+      }
+    } catch (err: unknown) {
+      setExportError(getErrorMessage(err, 'Could not create the export.'));
+    }
   };
 
   const handleCopy = async (index: number, text: string) => {
@@ -1594,7 +1736,10 @@ export default function Home() {
     // which one won depended on Tailwind's output order rather than intent.
     // `h-dvh` alone is what was wanted: the dynamic viewport height that
     // accounts for mobile browser chrome.
-    <div className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200">
+    <div
+      id="docagent-app"
+      className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200"
+    >
       {/* Hidden File Input */}
       <input
         ref={fileInputRef}
@@ -2409,6 +2554,14 @@ export default function Home() {
                       )}
 
                       {!isUser && (
+                        <ExportMenu
+                          label="Export this answer"
+                          disabled={loading}
+                          onExport={(format) => void handleExport(format, index)}
+                        />
+                      )}
+
+                      {!isUser && (
                         <button
                           type="button"
                           onClick={() => handleSaveArtifact(index, msg)}
@@ -2465,6 +2618,15 @@ export default function Home() {
         {!isEmptyChat && (
           <div className="px-3 sm:px-4 lg:px-6 pb-3 sm:pb-4 lg:pb-5 pt-2 shrink-0">
             <div className="max-w-4xl mx-auto">
+              {messages.some((message) => message.sender === 'user') && (
+                <div className="mb-2 flex justify-end">
+                  <ExportMenu
+                    label="Export chat"
+                    disabled={loading}
+                    onExport={(format) => void handleExport(format)}
+                  />
+                </div>
+              )}
               <ChatComposer
                 query={query}
                 setQuery={setQuery}
@@ -2592,6 +2754,71 @@ export default function Home() {
           onRetry={() => void handleGenerateMindMap(mindMapTopic)}
           onRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
         />
+      )}
+
+      {printExport && (
+        <article id="document-export-print" aria-hidden="true">
+          <h1>{printExport.title}</h1>
+          {printExport.entries.map((entry, index) => (
+            <section key={`${index}-${entry.question}`}>
+              <h2>Question {index + 1}</h2>
+              <p>{entry.question}</p>
+              <h3>Answer</h3>
+              <p className="export-preserve-lines">{entry.answer}</p>
+              {entry.sources.length > 0 && (
+                <>
+                  <h3>Sources</h3>
+                  <ul>
+                    {entry.sources.map((source, sourceIndex) => (
+                      <li key={`${source.source}-${sourceIndex}`}>
+                        {source.source || 'Document'} (
+                        {source.page ? `page ${source.page}` : source.location || 'document'})
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {entry.evidence && entry.evidence.length > 0 && (
+                <>
+                  <h3>Retrieved evidence</h3>
+                  {entry.evidence.map((text, evidenceIndex) => (
+                    <p className="export-preserve-lines" key={evidenceIndex}>
+                      {text}
+                    </p>
+                  ))}
+                </>
+              )}
+            </section>
+          ))}
+          {printExport.mindMapImage && (
+            <figure>
+              <h2>Mind map</h2>
+              <Image
+                src={printExport.mindMapImage.dataUrl}
+                alt="Generated document mind map"
+                width={printExport.mindMapImage.width}
+                height={printExport.mindMapImage.height}
+                unoptimized
+              />
+            </figure>
+          )}
+        </article>
+      )}
+      {exportError && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 z-[100] flex max-w-sm items-start gap-3 rounded-xl border border-rose-200 bg-white p-3 text-sm text-rose-700 shadow-xl dark:border-rose-900/70 dark:bg-slate-900 dark:text-rose-300"
+        >
+          <span>{exportError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss export error"
+            onClick={() => setExportError(null)}
+            className="ml-auto shrink-0 rounded px-1 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+          >
+            x
+          </button>
+        </div>
       )}
     </div>
   );

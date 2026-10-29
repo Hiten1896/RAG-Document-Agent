@@ -18,7 +18,10 @@
 8. Click **Suggest questions** below an answer. Confirm three follow-up chips
    appear, then click one to ask it as the next question. The exact not-found
    response does not offer suggestions.
-9. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
+9. Use **Export this answer** to save one answer and **Export chat** to save the
+   conversation. Try both Word and PDF; open Show evidence first to include
+   retrieved passages, and generate a mind map to include its image.
+10. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
    no-context comparison results.
 
 Uploads are held in an in-memory ChromaDB collection and are lost when the
