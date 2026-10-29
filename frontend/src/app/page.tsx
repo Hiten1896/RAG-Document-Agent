@@ -280,6 +280,49 @@ const GREETINGS: Record<
   ],
 };
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function linkInlineCitations(answer: string, sources: SourceMetadata[]): string {
+  const fileNames = [...new Set(sources.map((source) => source.source).filter(Boolean))]
+    .sort((left, right) => (right?.length ?? 0) - (left?.length ?? 0))
+    .filter((name): name is string => Boolean(name));
+  if (!fileNames.length) return answer;
+
+  const pattern = new RegExp(
+    `(${fileNames.map(escapeRegExp).join('|')})(?:\\s*[,;–—-]?\\s*(?:page|p\\.?|slide|sheet)\\s*([\\w-]+))?`,
+    'gi',
+  );
+  return answer.replace(pattern, (match, fileName: string, locationToken?: string) => {
+    const sameFileSources = sources.filter(
+      (source) => source.source?.toLowerCase() === fileName.toLowerCase(),
+    );
+    const selectedSource = locationToken
+      ? sameFileSources.find(
+          (source) =>
+            String(source.page ?? '').toLowerCase() === locationToken.toLowerCase() ||
+            source.location?.toLowerCase().endsWith(locationToken.toLowerCase()),
+        ) ?? sameFileSources[0]
+      : sameFileSources[0];
+    if (!selectedSource) return match;
+    const sourceIndex = sources.indexOf(selectedSource);
+    if (sourceIndex < 0) return match;
+    return `[${match.replace(/([\\[\]])/g, '\\$1')}](docagent-citation:${sourceIndex})`;
+  });
+}
+
+function getSourceExcerpt(
+  debug: QueryDebug | undefined,
+  source: SourceMetadata,
+): string | undefined {
+  return debug?.chunks.find(
+    (chunk) =>
+      chunk.source === source.source &&
+      (source.page ? chunk.page === source.page : chunk.location === source.location),
+  )?.text;
+}
+
 /* ───── Brand mark ─────
    An open document with a spark of insight rising from the page — reads at
    favicon size as a simple folded-corner sheet, and at sidebar size the
@@ -576,6 +619,8 @@ export default function Home() {
   const [viewerFile, setViewerFile] = useState<string | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [viewerPage, setViewerPage] = useState<number | null>(null);
+  const [viewerLocation, setViewerLocation] = useState<string | null>(null);
+  const [viewerText, setViewerText] = useState<string | null>(null);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
@@ -588,9 +633,12 @@ export default function Home() {
   const [suggestionNotice, setSuggestionNotice] = useState<string | null>(null);
 
   const openFileViewer = useCallback(
-    (fname: string, page?: number) => {
+    (fname: string, page?: number, location?: string, excerpt?: string) => {
       const match = ingestedFiles.find((f) => f.name === fname && f.file);
       if (!match?.file) return;
+      setViewerPage(page ?? null);
+      setViewerLocation(location ?? null);
+      setViewerText(excerpt ?? null);
       // Re-opening the file that's already showing used to still mint a new
       // blob URL every time this ran. PdfPreview resets pageNumber/zoom/
       // loadError whenever `fileUrl` changes, so a fresh URL for the same
@@ -598,7 +646,6 @@ export default function Home() {
       // the "flickers, then normal once touched" symptom. Only the page
       // number needs to move when it's the same file already open.
       if (fname === viewerFile) {
-        setViewerPage(page ?? null);
         return;
       }
       // react-pdf can only render actual PDFs. For every other supported
@@ -612,7 +659,6 @@ export default function Home() {
           return null;
         });
         setViewerFile(fname);
-        setViewerPage(page ?? null);
         return;
       }
       const url = URL.createObjectURL(match.file);
@@ -621,7 +667,6 @@ export default function Home() {
         return url;
       });
       setViewerFile(fname);
-      setViewerPage(page ?? null);
     },
     [ingestedFiles, viewerFile]
   );
@@ -629,6 +674,8 @@ export default function Home() {
   const closeFileViewer = useCallback(() => {
     setViewerFile(null);
     setViewerPage(null);
+    setViewerLocation(null);
+    setViewerText(null);
     setViewerUrl((prevUrl) => {
       if (prevUrl) URL.revokeObjectURL(prevUrl);
       return null;
@@ -1488,10 +1535,11 @@ export default function Home() {
     ).map((match) => match[1]);
     return getDeduplicatedSources(sources).filter((source) => {
       const page = source.page ? String(source.page) : '';
-      if (page && pageCitations.includes(page)) return true;
-      if (page) return false;
       const sourceName = (source.source || '').toLowerCase();
-      return Boolean(sourceName && normalizedAnswer.includes(sourceName));
+      const sourceMentioned = Boolean(sourceName && normalizedAnswer.includes(sourceName));
+      if (page && pageCitations.includes(page)) return true;
+      if (page && pageCitations.length > 0) return false;
+      return sourceMentioned;
     });
   };
 
@@ -1881,8 +1929,57 @@ export default function Home() {
             const isUser = msg.sender === 'user';
             const isEditing = editingIndex === index;
             const citedSources = getCitedSources(msg.text, msg.sources);
+            const markdownText = isUser
+              ? msg.text
+              : linkInlineCitations(msg.text, citedSources);
             const evidenceKey = `${activeConversationId}:${index}`;
             const evidenceIsOpen = openEvidence.has(evidenceKey);
+            const RenderMarkdownLink = (props: React.ComponentProps<'a'>) => {
+              const { href, children } = props;
+              const citationMatch =
+                typeof href === 'string' ? href.match(/^docagent-citation:(\d+)$/) : null;
+              const source = citationMatch
+                ? citedSources[Number(citationMatch[1])]
+                : undefined;
+              if (source?.source) {
+                const canOpen = ingestedFiles.some(
+                  (file) => file.name === source.source && file.file,
+                );
+                return (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      canOpen &&
+                      openFileViewer(
+                        source.source || '',
+                        source.page,
+                        source.location,
+                        getSourceExcerpt(msg.debug, source),
+                      )
+                    }
+                    disabled={!canOpen}
+                    className="text-indigo-600 underline decoration-indigo-400 underline-offset-2 dark:text-indigo-400"
+                    title={
+                      canOpen
+                        ? `Open ${source.source} at ${source.page ? `page ${source.page}` : source.location || 'the cited location'}`
+                        : source.source
+                    }
+                  >
+                    {children}
+                  </button>
+                );
+              }
+              return (
+                <a
+                  {...props}
+                  className="text-indigo-600 dark:text-indigo-400 underline"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {children}
+                </a>
+              );
+            };
 
             return (
               <div
@@ -2001,17 +2098,11 @@ export default function Home() {
                                   },
                                 },
                                 hr: { props: { className: 'my-3 border-slate-200 dark:border-slate-700' } },
-                                a: {
-                                  props: {
-                                    className: 'text-indigo-600 dark:text-indigo-400 underline',
-                                    target: '_blank',
-                                    rel: 'noopener noreferrer',
-                                  },
-                                },
+                                a: { component: RenderMarkdownLink },
                               },
                             }}
                           >
-                            {msg.text}
+                            {markdownText}
                           </Markdown>
                         </div>
                       )}
@@ -2034,15 +2125,21 @@ export default function Home() {
                             <div className="flex flex-wrap gap-1.5">
                             {citedSources.map((src, srcIndex) => {
                               const isVisual = src.chunk_type === 'visual';
-                              const pageText = src.page ? `Page ${src.page}` : '';
+                              const pageText = src.page
+                                ? `Page ${src.page}`
+                                : src.location || '';
                               const sourceName = src.source || 'Document';
                               const canOpen = ingestedFiles.some((f) => f.name === sourceName && f.file);
+                              const excerpt = getSourceExcerpt(msg.debug, src);
 
                               return (
                                 <button
                                   key={srcIndex}
                                   type="button"
-                                  onClick={() => canOpen && openFileViewer(sourceName, src.page)}
+                                  onClick={() =>
+                                    canOpen &&
+                                    openFileViewer(sourceName, src.page, src.location, excerpt)
+                                  }
                                   disabled={!canOpen}
                                   className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs font-mono transition shadow-sm ${
                                     !canOpen ? 'cursor-default opacity-90' : 'cursor-pointer hover:shadow-md hover:-translate-y-px'
@@ -2345,28 +2442,37 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Citation banner — a plain <iframe>'s native PDF viewer can be
-              told which page to jump to (via the URL hash below) but not
-              told to highlight text inside the document itself, so this
-              banner names the cited page as the closest achievable stand-in. */}
-          {viewerPage && (
+          {(viewerPage || viewerLocation) && (
             <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
               <Search className="w-3.5 h-3.5 shrink-0" />
-              <span>Cited from page {viewerPage} — jumped there below.</span>
+              <span>
+                Cited from {viewerPage ? `page ${viewerPage}` : viewerLocation} — showing the
+                relevant passage below when available.
+              </span>
             </div>
           )}
 
           <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
             {viewerFile && !viewerFile.toLowerCase().endsWith('.pdf') ? (
-              <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
-                <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  In-app preview isn&apos;t available for this file type yet.
-                </p>
-                <p className="text-xs text-slate-400 dark:text-slate-600">
-                  {viewerFile}
-                </p>
-              </div>
+              viewerText ? (
+                <div className="h-full overflow-y-auto p-4">
+                  <p className="mb-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    Extracted text{viewerLocation ? ` · ${viewerLocation}` : ''}
+                  </p>
+                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+                    {viewerText}
+                  </p>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
+                  <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Native preview isn&apos;t available for this file type, and no extracted
+                    passage is attached to this citation.
+                  </p>
+                  <p className="text-xs text-slate-400 dark:text-slate-600">{viewerFile}</p>
+                </div>
+              )
             ) : viewerUrl ? (
               <PdfPreview
                 key={`${viewerUrl}:${viewerPage ?? 0}`}
@@ -2389,6 +2495,8 @@ export default function Home() {
           viewerFile={viewerFile}
           viewerUrl={viewerUrl}
           viewerPage={viewerPage}
+          viewerLocation={viewerLocation}
+          viewerText={viewerText}
           onClose={closeFileViewer}
         />
       )}

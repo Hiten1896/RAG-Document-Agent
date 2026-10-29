@@ -15,6 +15,12 @@ source labels on map nodes, and caps each request at four LLM calls. The browser
 renders maps with `markmap-lib` and `markmap-view`; maps can be fitted to the
 screen and downloaded as SVG or PNG.
 
+Answer citations and source cards open the cited PDF page in the viewer. For
+DOCX, PPTX, XLSX, CSV, TXT, and Markdown files, the viewer shows the extracted
+passage and its page, slide, sheet, or document location when that text is
+available in the answer evidence. PDF text highlighting is not currently
+provided.
+
 ## LLM providers
 
 Gemini is tried first by default, with Groq as the fallback:
@@ -61,6 +67,9 @@ prompt, provider/model, routing attempts, and any Groq context trimming. Mind
 map responses include provider/model, chunk count, cache status, and timings
 when requested. The frontend's Show evidence panel renders query information,
 including `Answered by provider / model`.
+Query sources carry a numeric `page` where available and a `location` label for
+slides, sheets, or unpaginated text; the frontend uses these fields for citation
+navigation.
 
 Mind maps are cached in memory per session, chat, document set, and topic; they
 are cleared with the chat and expire with its normal session cleanup. They need
