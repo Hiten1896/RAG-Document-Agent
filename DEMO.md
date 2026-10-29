@@ -27,7 +27,10 @@
    non-streaming query remains the default.
 11. Click **Quiz me**, select a question count and difficulty, answer questions
     to see the score and source, then switch to flashcards and flip a card.
-12. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
+12. Upload two documents to the same chat, open **Compare documents**, select
+   two file chips, and review the agreement/difference table with page sources.
+   In a chat with fewer than two documents, show the upload-two-files message.
+13. Open `eval/results.md` and show the legacy, strict, automatic-routing, and
    no-context comparison results.
 
 Uploads are held in an in-memory ChromaDB collection and are lost when the

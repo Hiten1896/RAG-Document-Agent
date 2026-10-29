@@ -62,3 +62,12 @@ JSON, four-option schema validation, exact requested question counts, rejection
 of an answer absent from the source text, and context limits on a large document.
 These tests use a fake LLM provider; they validate grounding enforcement and
 response behavior, not live-provider quiz quality.
+
+## Per-file comparison API validation
+
+`python -m unittest eval.test_compare -v` passed all 6 deterministic endpoint
+tests. They verify independent session-plus-file retrieval for both selected
+files, chat isolation, per-file context limits, citation-label validation,
+the fewer-than-two-files guard, and the two-call invalid-JSON repair limit.
+These tests use a fake LLM provider; they validate the endpoint contract and
+retrieval boundaries, not live-provider comparison quality.

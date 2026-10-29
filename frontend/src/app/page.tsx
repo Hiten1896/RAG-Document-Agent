@@ -12,6 +12,7 @@ import {
   generateFollowups,
   generateMindMap,
   generateQuiz,
+  compareDocuments,
   clearSession,
   SourceMetadata,
   QueryDebug,
@@ -19,6 +20,7 @@ import {
   QueryStreamEvent,
   QuizDifficulty,
   QuizResponse,
+  CompareResponse,
 } from '@/lib/api';
 import {
   createMindMapImage,
@@ -112,6 +114,10 @@ const QuizPanel = dynamic(() => import('./QuizPanel'), {
   ssr: false,
 });
 
+const ComparePanel = dynamic(() => import('./ComparePanel'), {
+  ssr: false,
+});
+
 /* ───── Types ───── */
 interface Message {
   sender: 'user' | 'agent';
@@ -129,6 +135,7 @@ interface Message {
 
 interface IngestedFile {
   name: string;
+  chatId: string;
   status: 'processing' | 'completed' | 'failed';
   pages?: number;
   chunks?: number;
@@ -271,6 +278,7 @@ const ANALYSIS_PRESETS = [
     icon: ClipboardList,
     isMindMap: false,
     isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Mind map',
@@ -279,6 +287,7 @@ const ANALYSIS_PRESETS = [
     icon: GitBranch,
     isMindMap: true,
     isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Quiz me',
@@ -287,6 +296,7 @@ const ANALYSIS_PRESETS = [
     icon: CheckCircle2,
     isMindMap: false,
     isQuiz: true,
+    isCompare: false,
   },
   {
     label: 'Key risks',
@@ -296,6 +306,7 @@ const ANALYSIS_PRESETS = [
     icon: ShieldAlert,
     isMindMap: false,
     isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Action items',
@@ -305,15 +316,16 @@ const ANALYSIS_PRESETS = [
     icon: ListChecks,
     isMindMap: false,
     isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Compare documents',
     hint: 'Agreements and differences',
-    prompt:
-      'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
+    prompt: '',
     icon: GitCompareArrows,
     isMindMap: false,
     isQuiz: false,
+    isCompare: true,
   },
   {
     label: 'Key terms',
@@ -323,6 +335,7 @@ const ANALYSIS_PRESETS = [
     icon: BookOpen,
     isMindMap: false,
     isQuiz: false,
+    isCompare: false,
   },
   {
     label: 'Timeline',
@@ -332,6 +345,7 @@ const ANALYSIS_PRESETS = [
     icon: CalendarDays,
     isMindMap: false,
     isQuiz: false,
+    isCompare: false,
   },
 ];
 
@@ -723,6 +737,13 @@ export default function Home() {
   const [quizConversationId, setQuizConversationId] = useState(activeConversationId);
   const [quizPanelVersion, setQuizPanelVersion] = useState(0);
   const quizRequestIdRef = useRef(0);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [compareData, setCompareData] = useState<CompareResponse | null>(null);
+  const [compareLoading, setCompareLoading] = useState(false);
+  const [compareError, setCompareError] = useState<string | null>(null);
+  const [compareConversationId, setCompareConversationId] =
+    useState(activeConversationId);
+  const compareRequestIdRef = useRef(0);
   const [visibleAnalysisPresets, setVisibleAnalysisPresets] = useState(() => [
     ...ANALYSIS_PRESETS.filter((preset) => preset.isQuiz),
     ...ANALYSIS_PRESETS.filter((preset) => !preset.isQuiz).slice(0, 3),
@@ -731,7 +752,12 @@ export default function Home() {
 
   const openFileViewer = useCallback(
     (fname: string, page?: number, location?: string, excerpt?: string) => {
-      const match = ingestedFiles.find((f) => f.name === fname && f.file);
+      const match = ingestedFiles.find(
+        (f) =>
+          f.chatId === activeConversationId &&
+          f.name === fname &&
+          f.file,
+      );
       if (!match?.file) return;
       setViewerPage(page ?? null);
       setViewerLocation(location ?? null);
@@ -765,7 +791,7 @@ export default function Home() {
       });
       setViewerFile(fname);
     },
-    [ingestedFiles, viewerFile]
+    [activeConversationId, ingestedFiles, viewerFile]
   );
 
   const closeFileViewer = useCallback(() => {
@@ -1100,13 +1126,14 @@ export default function Home() {
   const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const streamControllerRef = useRef<AbortController | null>(null);
-  // Bumped on unmount and on retry so a resolving ingest can't setState on an
-  // unmounted tree or overwrite the result of a newer attempt.
-  const pollTokenRef = useRef(0);
+  // Per-file tokens let parallel uploads complete independently while still
+  // making a newer retry supersede an older request for the same file.
+  const pollTokenRef = useRef(new Map<string, number>());
 
   useEffect(() => {
+    const requestTokens = pollTokenRef.current;
     return () => {
-      pollTokenRef.current++;
+      requestTokens.clear();
     };
   }, []);
 
@@ -1205,9 +1232,14 @@ export default function Home() {
 
     if (rejected.length) {
       setIngestedFiles((prev) => [
-        ...prev.filter((f) => !rejected.some((r) => r.name === f.name)),
+        ...prev.filter(
+          (f) =>
+            f.chatId !== activeConversationId ||
+            !rejected.some((r) => r.name === f.name),
+        ),
         ...rejected.map((f) => ({
           name: f.name,
+          chatId: activeConversationId,
           status: 'failed' as const,
           error: `Unsupported file type. Supported: ${SUPPORTED_UPLOAD_LABEL}.`,
         })),
@@ -1218,7 +1250,9 @@ export default function Home() {
     // for a failed file goes through handleRetryIngest instead, which
     // explicitly re-triggers that one file.
     const newFiles = accepted.filter((f) => {
-      const existing = ingestedFiles.find((ef) => ef.name === f.name);
+      const existing = ingestedFiles.find(
+        (ef) => ef.name === f.name && ef.chatId === activeConversationId,
+      );
       return !existing || existing.status === 'failed';
     });
 
@@ -1228,21 +1262,26 @@ export default function Home() {
     await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
   }
 
-  async function triggerAutoIngest(fileToIngest: File) {
+  async function triggerAutoIngest(
+    fileToIngest: File,
+    targetChatId = activeConversationId,
+  ) {
     const name = fileToIngest.name;
 
     // Guards against a stale response overwriting a newer one for the same
     // filename — a retry started while the first request is still in flight.
-    const requestToken = ++pollTokenRef.current;
-    const isStale = () => pollTokenRef.current !== requestToken;
+    const requestKey = JSON.stringify([targetChatId, name]);
+    const requestToken = (pollTokenRef.current.get(requestKey) ?? 0) + 1;
+    pollTokenRef.current.set(requestKey, requestToken);
+    const isStale = () => pollTokenRef.current.get(requestKey) !== requestToken;
 
     // Captured now: the active chat can change while the upload is in flight,
     // and the document must be indexed under the chat it was dropped into.
-    const targetChatId = activeConversationId;
-
     setIngestedFiles((prev) => [
-      ...prev.filter((f) => f.name !== name),
-      { name, status: 'processing', file: fileToIngest },
+      ...prev.filter(
+        (f) => f.name !== name || f.chatId !== targetChatId,
+      ),
+      { name, chatId: targetChatId, status: 'processing', file: fileToIngest },
     ]);
     setPendingAttachments((prev) => (prev.includes(name) ? prev : [...prev, name]));
 
@@ -1257,7 +1296,7 @@ export default function Home() {
 
       setIngestedFiles((prev) =>
         prev.map((f) =>
-          f.name === name
+          f.name === name && f.chatId === targetChatId
             ? { ...f, status: 'completed', pages: res.pages, chunks: res.chunks }
             : f
         )
@@ -1266,7 +1305,11 @@ export default function Home() {
       if (isStale()) return;
       const message = getErrorMessage(err, 'Failed to communicate with backend.');
       setIngestedFiles((prev) =>
-        prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
+        prev.map((f) =>
+          f.name === name && f.chatId === targetChatId
+            ? { ...f, status: 'failed', error: message }
+            : f,
+        ),
       );
     }
   }
@@ -1276,7 +1319,7 @@ export default function Home() {
      to re-pick it from disk. */
   const handleRetryIngest = (fileToRetry: IngestedFile) => {
     if (!fileToRetry.file) return;
-    triggerAutoIngest(fileToRetry.file);
+    triggerAutoIngest(fileToRetry.file, fileToRetry.chatId);
   };
 
   const handleGenerateMindMap = async (topic?: string, regenerate = false) => {
@@ -1288,7 +1331,12 @@ export default function Home() {
     setMindMapTopic(normalizedTopic);
     if (!regenerate) setMindMapData(null);
 
-    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === targetConversationId && file.status === 'completed',
+      )
+    ) {
       setMindMapData(null);
       setMindMapError('Upload a document to create a grounded mind map.');
       setMindMapLoading(false);
@@ -1316,7 +1364,12 @@ export default function Home() {
   };
 
   const handleOpenQuiz = () => {
-    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === activeConversationId && file.status === 'completed',
+      )
+    ) {
       setSuggestionNotice('Upload a document first, then tap “Quiz me” to practice its facts.');
       return;
     }
@@ -1368,8 +1421,68 @@ export default function Home() {
     setQuizLoading(false);
   };
 
+  const handleOpenCompare = () => {
+    setSuggestionNotice(null);
+    setCompareConversationId(activeConversationId);
+    setCompareData(null);
+    setCompareError(null);
+    setCompareOpen(true);
+  };
+
+  const handleCompareDocuments = async (
+    fileA: string,
+    fileB: string,
+    focus: string,
+  ) => {
+    const targetConversationId = activeConversationId;
+    const requestId = compareRequestIdRef.current + 1;
+    compareRequestIdRef.current = requestId;
+    setCompareConversationId(targetConversationId);
+    setCompareData(null);
+    setCompareError(null);
+    setCompareLoading(true);
+    try {
+      const result = await compareDocuments(
+        fileA,
+        fileB,
+        focus,
+        targetConversationId,
+      );
+      if (
+        compareRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setCompareData(result);
+      }
+    } catch (err: unknown) {
+      if (
+        compareRequestIdRef.current === requestId &&
+        activeConversationId === targetConversationId
+      ) {
+        setCompareError(
+          getErrorMessage(err, 'Could not compare the selected documents.'),
+        );
+      }
+    } finally {
+      if (compareRequestIdRef.current === requestId) {
+        setCompareLoading(false);
+      }
+    }
+  };
+
+  const handleCloseCompare = () => {
+    compareRequestIdRef.current += 1;
+    setCompareOpen(false);
+    setCompareLoading(false);
+  };
+
   const handleAnalysisPreset = (preset: (typeof ANALYSIS_PRESETS)[number]) => {
-    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === activeConversationId && file.status === 'completed',
+      )
+    ) {
       setSuggestionNotice(
         `Upload a document first, then tap “${preset.label}” to run this analysis.`
       );
@@ -1379,6 +1492,10 @@ export default function Home() {
     setSuggestionNotice(null);
     if (preset.isQuiz) {
       handleOpenQuiz();
+      return;
+    }
+    if (preset.isCompare) {
+      handleOpenCompare();
       return;
     }
     if (preset.isMindMap) {
@@ -1933,7 +2050,12 @@ export default function Home() {
     `${((milliseconds || 0) / 1000).toFixed(1)}s`;
 
   const isEmptyChat = messages.length === 0;
-  const hasIndexedDocuments = ingestedFiles.some((file) => file.status === 'completed');
+  const activeChatFiles = ingestedFiles.filter(
+    (file) => file.chatId === activeConversationId,
+  );
+  const hasIndexedDocuments = activeChatFiles.some(
+    (file) => file.status === 'completed',
+  );
 
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
@@ -2308,7 +2430,7 @@ export default function Home() {
                   listening={listening}
                   pendingAttachments={pendingAttachments}
                   setPendingAttachments={setPendingAttachments}
-                  ingestedFiles={ingestedFiles}
+                  ingestedFiles={activeChatFiles}
                   handleRetryIngest={handleRetryIngest}
                   floating
                 />
@@ -2341,7 +2463,7 @@ export default function Home() {
                 ? citedSources[Number(citationMatch[1])]
                 : undefined;
               if (source?.source) {
-                const canOpen = ingestedFiles.some(
+                const canOpen = activeChatFiles.some(
                   (file) => file.name === source.source && file.file,
                 );
                 return (
@@ -2539,7 +2661,9 @@ export default function Home() {
                                 ? `Page ${src.page}`
                                 : src.location || '';
                               const sourceName = src.source || 'Document';
-                              const canOpen = ingestedFiles.some((f) => f.name === sourceName && f.file);
+                              const canOpen = activeChatFiles.some(
+                                (file) => file.name === sourceName && file.file,
+                              );
                               const excerpt = getSourceExcerpt(msg.debug, src);
 
                               return (
@@ -2871,7 +2995,7 @@ export default function Home() {
                 listening={listening}
                 pendingAttachments={pendingAttachments}
                 setPendingAttachments={setPendingAttachments}
-                ingestedFiles={ingestedFiles}
+                ingestedFiles={activeChatFiles}
                 handleRetryIngest={handleRetryIngest}
               />
             </div>
@@ -2998,6 +3122,23 @@ export default function Home() {
           error={quizError}
           onClose={handleCloseQuiz}
           onGenerate={handleGenerateQuiz}
+        />
+      )}
+
+      {compareOpen && compareConversationId === activeConversationId && (
+        <ComparePanel
+          files={[
+            ...new Set(
+              activeChatFiles
+                .filter((file) => file.status === 'completed')
+                .map((file) => file.name),
+            ),
+          ]}
+          data={compareData}
+          loading={compareLoading}
+          error={compareError}
+          onClose={handleCloseCompare}
+          onCompare={handleCompareDocuments}
         />
       )}
 

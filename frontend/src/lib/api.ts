@@ -199,6 +199,32 @@ export interface QuizResponse {
   };
 }
 
+export interface ComparisonRow {
+  kind: 'agreement' | 'difference';
+  topic: string;
+  document_a: string;
+  source_a: string;
+  document_b: string;
+  source_b: string;
+}
+
+export interface CompareResponse {
+  files: [string, string];
+  comparisons: ComparisonRow[];
+  debug?: {
+    chunks_by_file: Record<string, number>;
+    context_chars_by_file: Record<string, number>;
+    provider: string;
+    model: string;
+    lookup_ms: number;
+    embed_ms: number;
+    retrieve_ms: number;
+    generation_ms: number;
+    total_ms: number;
+    llm_attempts: number;
+  };
+}
+
 export interface MindMapNode {
   title: string;
   source: string | null;
@@ -281,6 +307,7 @@ const QUERY_TIMEOUT_MS = 120_000;
 const FOLLOWUPS_TIMEOUT_MS = 60_000;
 const MINDMAP_TIMEOUT_MS = 120_000;
 const QUIZ_TIMEOUT_MS = 120_000;
+const COMPARE_TIMEOUT_MS = 120_000;
 const CLEAR_TIMEOUT_MS = 15_000;
 
 function timeoutSignal(ms: number): AbortSignal | undefined {
@@ -575,6 +602,39 @@ export async function generateQuiz(
 
   if (!response.ok) {
     throw await parseErrorResponse(response, 'Failed to generate a quiz.');
+  }
+
+  return response.json();
+}
+
+export async function compareDocuments(
+  fileA: string,
+  fileB: string,
+  focus: string,
+  chatId?: string,
+): Promise<CompareResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}/compare`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...sessionHeaders(chatId),
+        'X-Debug': 'true',
+      },
+      body: JSON.stringify({
+        file_a: fileA,
+        file_b: fileB,
+        ...(focus.trim() ? { focus: focus.trim() } : {}),
+      }),
+      signal: timeoutSignal(COMPARE_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Document comparison timed out. Please try again.');
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response, 'Failed to compare documents.');
   }
 
   return response.json();
