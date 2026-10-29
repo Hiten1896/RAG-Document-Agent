@@ -6,9 +6,11 @@ import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
   queryDocument,
+  generateMindMap,
   clearSession,
   SourceMetadata,
   QueryDebug,
+  MindMapResponse,
 } from '@/lib/api';
 import {
   Send,
@@ -45,6 +47,7 @@ import {
   GitCompareArrows,
   Download,
   BookmarkCheck,
+  GitBranch,
 } from 'lucide-react';
 
 // react-pdf renders PDFs itself via pdf.js instead of relying on the
@@ -81,6 +84,15 @@ const PdfPreview = dynamic(() => import('./PdfPreview'), {
 // PdfPreview and avoids rendering mobile-only UI during server render.
 const MobileFileViewer = dynamic(() => import('./MobileFileViewer'), {
   ssr: false,
+});
+
+const MindMapPanel = dynamic(() => import('./MindMapPanel'), {
+  ssr: false,
+  loading: () => (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 text-sm text-white">
+      Loading mind map…
+    </div>
+  ),
 });
 
 /* ───── Types ───── */
@@ -157,6 +169,14 @@ const ANALYSIS_PRESETS = [
     prompt:
       'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
     icon: ClipboardList,
+    isMindMap: false,
+  },
+  {
+    label: 'Mind map',
+    hint: 'Explore the document visually',
+    prompt: '',
+    icon: GitBranch,
+    isMindMap: true,
   },
   {
     label: 'Key risks',
@@ -164,6 +184,7 @@ const ANALYSIS_PRESETS = [
     prompt:
       'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
     icon: ShieldAlert,
+    isMindMap: false,
   },
   {
     label: 'Action items',
@@ -171,6 +192,7 @@ const ANALYSIS_PRESETS = [
     prompt:
       'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
     icon: ListChecks,
+    isMindMap: false,
   },
   {
     label: 'Compare documents',
@@ -178,6 +200,7 @@ const ANALYSIS_PRESETS = [
     prompt:
       'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
     icon: GitCompareArrows,
+    isMindMap: false,
   },
 ];
 
@@ -479,6 +502,12 @@ export default function Home() {
   const [viewerFile, setViewerFile] = useState<string | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [viewerPage, setViewerPage] = useState<number | null>(null);
+  const [mindMapOpen, setMindMapOpen] = useState(false);
+  const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
+  const [mindMapLoading, setMindMapLoading] = useState(false);
+  const [mindMapError, setMindMapError] = useState<string | null>(null);
+  const [mindMapTopic, setMindMapTopic] = useState('');
+  const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
 
   const openFileViewer = useCallback(
     (fname: string, page?: number) => {
@@ -1048,6 +1077,42 @@ export default function Home() {
   const handleRetryIngest = (fileToRetry: IngestedFile) => {
     if (!fileToRetry.file) return;
     triggerAutoIngest(fileToRetry.file);
+  };
+
+  const handleGenerateMindMap = async (topic?: string, regenerate = false) => {
+    const normalizedTopic = topic?.trim() || '';
+    const targetConversationId = activeConversationId;
+    setMindMapOpen(true);
+    setMindMapConversationId(targetConversationId);
+    setMindMapError(null);
+    setMindMapTopic(normalizedTopic);
+    if (!regenerate) setMindMapData(null);
+
+    if (!ingestedFiles.some((file) => file.status === 'completed')) {
+      setMindMapData(null);
+      setMindMapError('Upload a document to create a grounded mind map.');
+      setMindMapLoading(false);
+      return;
+    }
+
+    setMindMapLoading(true);
+    try {
+      const result = await generateMindMap(targetConversationId, {
+        ...(normalizedTopic ? { topic: normalizedTopic } : {}),
+        ...(regenerate ? { regenerate: true } : {}),
+      });
+      if (activeConversationId === targetConversationId) {
+        setMindMapData(result);
+      }
+    } catch (err: unknown) {
+      if (activeConversationId === targetConversationId) {
+        setMindMapError(getErrorMessage(err, 'Could not generate the mind map.'));
+      }
+    } finally {
+      if (activeConversationId === targetConversationId) {
+        setMindMapLoading(false);
+      }
+    }
   };
 
   /* Query */
@@ -1706,8 +1771,12 @@ export default function Home() {
                       <button
                         key={preset.label}
                         type="button"
-                        disabled={!hasIndexedDocuments || loading}
-                        onClick={() => void handleSendQuery(undefined, preset.prompt)}
+                        disabled={(!hasIndexedDocuments && !preset.isMindMap) || loading}
+                        onClick={() =>
+                          preset.isMindMap
+                            ? void handleGenerateMindMap()
+                            : void handleSendQuery(undefined, preset.prompt)
+                        }
                         className="min-h-[88px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 px-3 py-3 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 disabled:cursor-not-allowed disabled:opacity-45"
                       >
                         <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mb-2" />
@@ -2077,6 +2146,25 @@ export default function Home() {
                         </button>
                       )}
 
+                      {!isUser && index > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const topic = messages
+                              .slice(0, index)
+                              .reverse()
+                              .find((message) => message.sender === 'user')?.text;
+                            void handleGenerateMindMap(topic);
+                          }}
+                          disabled={mindMapLoading}
+                          className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
+                          title="Create a grounded mind map"
+                          aria-label="Create a grounded mind map"
+                        >
+                          <GitBranch className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
                       {!isUser && (
                         <button
                           type="button"
@@ -2233,6 +2321,18 @@ export default function Home() {
           viewerUrl={viewerUrl}
           viewerPage={viewerPage}
           onClose={closeFileViewer}
+        />
+      )}
+
+      {mindMapOpen && mindMapConversationId === activeConversationId && (
+        <MindMapPanel
+          data={mindMapData}
+          loading={mindMapLoading}
+          error={mindMapError}
+          canGenerate={hasIndexedDocuments}
+          onClose={() => setMindMapOpen(false)}
+          onRetry={() => void handleGenerateMindMap(mindMapTopic)}
+          onRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
         />
       )}
     </div>

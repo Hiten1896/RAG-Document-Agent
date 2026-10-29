@@ -9,6 +9,12 @@ Text is chunked and embedded through the remote Jina embeddings API. Retrieved
 chunks are stored in an in-memory ChromaDB collection, so uploads disappear when
 the backend restarts.
 
+The app can also generate a grounded, interactive mind map from all documents
+in the active chat. It samples document chunks across their locations, keeps
+source labels on map nodes, and caps each request at four LLM calls. The browser
+renders maps with `markmap-lib` and `markmap-view`; maps can be fitted to the
+screen and downloaded as SVG or PNG.
+
 ## LLM providers
 
 Gemini is tried first by default, with Groq as the fallback:
@@ -46,13 +52,19 @@ prompt.
 
 - `POST /api/ingest` uploads and indexes one supported document.
 - `POST /api/query` retrieves chunks and generates an answer.
+- `POST /api/mindmap` generates a structured mind map from the active chat's documents.
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
-Use `X-Session-Id` and `X-Chat-Id` on ingest/query. Add `X-Debug: true` to query
-responses to receive retrieved chunks, relevance scores, the exact prompt,
-provider/model, routing attempts, and any Groq context trimming. The frontend's
-Show evidence panel renders this information, including `Answered by provider /
-model`.
+Use `X-Session-Id` and `X-Chat-Id` on ingest/query/mindmap. Add `X-Debug: true`
+to query responses to receive retrieved chunks, relevance scores, the exact
+prompt, provider/model, routing attempts, and any Groq context trimming. Mind
+map responses include provider/model, chunk count, cache status, and timings
+when requested. The frontend's Show evidence panel renders query information,
+including `Answered by provider / model`.
+
+Mind maps are cached in memory per session, chat, document set, and topic; they
+are cleared with the chat and expire with its normal session cleanup. They need
+no additional environment variables or Python dependencies.
 
 Grounding behavior is verified by the fixtures and results in
 [eval/results.md](eval/results.md), using

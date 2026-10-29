@@ -27,6 +27,36 @@ export interface QueryResponse {
   debug?: QueryDebug;
 }
 
+export interface MindMapNode {
+  title: string;
+  source: string | null;
+  children: MindMapNode[];
+}
+
+export interface MindMapDebug {
+  provider?: string | null;
+  model?: string | null;
+  chunks_used: number;
+  files: string[];
+  embed_ms: number;
+  retrieve_ms: number;
+  reduce_ms: number;
+  total_ms: number;
+  cache_hit: boolean;
+}
+
+export interface MindMapResponse {
+  title: string;
+  children: MindMapNode[];
+  debug?: MindMapDebug;
+}
+
+export interface MindMapOptions {
+  topic?: string;
+  fileName?: string;
+  regenerate?: boolean;
+}
+
 export interface QueryDebugChunk {
   text: string;
   source?: string;
@@ -74,6 +104,7 @@ const API_PREFIX = '/api';
  */
 const INGEST_TIMEOUT_MS = 180_000;
 const QUERY_TIMEOUT_MS = 120_000;
+const MINDMAP_TIMEOUT_MS = 120_000;
 const CLEAR_TIMEOUT_MS = 15_000;
 
 function timeoutSignal(ms: number): AbortSignal | undefined {
@@ -222,6 +253,37 @@ export async function queryDocument(
           }
         : undefined,
   };
+}
+
+export async function generateMindMap(
+  chatId?: string,
+  options: MindMapOptions = {},
+): Promise<MindMapResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}/mindmap`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...sessionHeaders(chatId),
+        'X-Debug': 'true',
+      },
+      body: JSON.stringify({
+        ...(options.topic ? { topic: options.topic } : {}),
+        ...(options.fileName ? { file_name: options.fileName } : {}),
+        ...(options.regenerate ? { regenerate: true } : {}),
+      }),
+      signal: timeoutSignal(MINDMAP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Mind map generation timed out. Please try again.');
+  }
+
+  if (!response.ok) {
+    throw await parseErrorResponse(response, 'Failed to generate a mind map.');
+  }
+
+  return response.json();
 }
 
 /**
