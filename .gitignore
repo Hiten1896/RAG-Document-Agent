@@ -27,6 +27,7 @@ data/uploads/*
 # Environment Variables
 .env
 .env.local
+.claude/
 
 # Next.js build output
 .next/
