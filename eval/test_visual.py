@@ -58,6 +58,28 @@ class VisualEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertIn("not found", response.json()["detail"])
 
+    def test_explainer_cards_keep_sources_on_points_steps_numbers_and_glossary(self):
+        vector = FakeVectorStore()
+        metadata, text = stored("visual", "chat", "The institute was founded in 1987 and teaches robotics.")
+        vector.add_texts([text], [metadata])
+        llm = FakeLLM(json.dumps({
+            "title": "Institute overview",
+            "summary": {"text": "A document-grounded overview.", "source": "page 1"},
+            "key_points": [
+                {"text": "Founded in 1987", "source": "page 1"},
+                {"text": "Teaches robotics", "source": "page 1"},
+                {"text": "No outside facts", "source": "page 1"},
+            ],
+            "steps": [{"text": "Read the stated history", "source": "page 1"}],
+            "key_numbers": [{"label": "Founded", "value": "1987", "source": "page 1"}],
+            "glossary": [{"term": "Robotics", "definition": "A stated subject", "source": "page 1"}],
+        }))
+        result = self.request({"kind": "explainer"}, llm, vector).json()
+        self.assertEqual(len(result["key_points"]), 3)
+        self.assertEqual(result["key_numbers"][0]["source"], "page 1")
+        self.assertEqual(result["glossary"][0]["source"], "page 1")
+        self.assertNotIn("Paris", json.dumps(result))
+
     def test_bad_json_gets_one_repair_retry(self):
         vector = FakeVectorStore()
         metadata, text = stored("visual", "chat", "The institute was founded in 1987.")

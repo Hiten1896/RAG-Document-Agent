@@ -58,6 +58,7 @@ function DiagramView({ data }: { data: VisualDiagram }) {
 
 function ExplainerView({ data }: { data: VisualExplainer }) {
   return <div className="space-y-4">
+    <div className="flex justify-end"><button type="button" onClick={() => downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'visual-explanation.json')} className="visual-download"><Download className="h-3.5 w-3.5" />Download cards</button></div>
     <div><h3 className="text-lg font-semibold">{data.title}</h3><p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{data.summary.text}</p><Source value={data.summary.source} /></div>
     <div className="grid gap-2 sm:grid-cols-2">{data.key_points.map((point, index) => <article key={`${point.text}-${index}`} className="rounded-xl border border-slate-200 p-3 dark:border-slate-700"><p className="text-sm">{point.text}</p><Source value={point.source} /></article>)}</div>
     {data.steps.length > 0 && <ol className="space-y-2">{data.steps.map((step, index) => <li key={`${step.text}-${index}`} className="flex gap-3 rounded-xl bg-indigo-50 p-3 text-sm dark:bg-indigo-500/10"><span className="font-semibold text-indigo-600">{index + 1}</span><span>{step.text}<br /><Source value={step.source} /></span></li>)}</ol>}
