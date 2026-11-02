@@ -40,6 +40,15 @@ body {
   @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
 }
 
+.visual-download {
+  @apply inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:border-indigo-400 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-indigo-500 dark:hover:text-indigo-300;
+}
+
+.visual-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
 /* ───── Slim scrollbar ─────
    The sidebar and the viewer body scroll, and the platform default scrollbar
    is heavy enough to read as a UI element in its own right — which is exactly
@@ -150,5 +159,82 @@ body {
   .animate-panel-in,
   .animate-sheet-up {
     animation: fade-in 0.15s ease-out;
+  }
+}
+
+#document-export-print {
+  display: none;
+}
+
+@media print {
+  @page {
+    margin: 18mm;
+  }
+
+  body > * {
+    display: none !important;
+  }
+
+  body > #docagent-app {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    position: static !important;
+  }
+
+  #docagent-app > * {
+    visibility: hidden !important;
+  }
+
+  #document-export-print,
+  #document-export-print * {
+    visibility: visible !important;
+  }
+
+  #document-export-print {
+    background: #fff !important;
+    color: #0f172a !important;
+    display: block !important;
+    font: 11pt/1.5 Arial, sans-serif;
+    height: auto !important;
+    margin: 0 auto;
+    overflow: visible !important;
+    padding: 0;
+    position: static !important;
+    width: 100% !important;
+  }
+
+  #document-export-print h1 {
+    font-size: 20pt;
+    margin: 0 0 18pt;
+    overflow-wrap: anywhere;
+  }
+
+  #document-export-print h2 {
+    font-size: 14pt;
+    margin: 18pt 0 6pt;
+  }
+
+  #document-export-print h3 {
+    font-size: 11pt;
+    margin: 12pt 0 4pt;
+  }
+
+  #document-export-print p,
+  #document-export-print li {
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+
+  #document-export-print section {
+    break-inside: auto;
+  }
+
+  #document-export-print img {
+    height: auto;
+    max-height: 250mm;
+    max-width: 100%;
+    width: auto;
   }
 }

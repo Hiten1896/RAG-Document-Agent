@@ -27,11 +27,9 @@ pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.vers
 export default function PdfPreview({
   fileUrl,
   initialPage,
-  fileName,
 }: {
   fileUrl: string;
   initialPage: number | null;
-  fileName: string;
 }) {
   const [numPages, setNumPages] = useState<number | null>(null);
   const [pageNumber, setPageNumber] = useState(initialPage && initialPage > 0 ? initialPage : 1);
@@ -39,14 +37,6 @@ export default function PdfPreview({
   const [zoom, setZoom] = useState(1);
   const [containerWidth, setContainerWidth] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
-
-  // Jump to the cited page whenever a new citation is opened (fileUrl
-  // changing means a different open/reopen of the viewer).
-  useEffect(() => {
-    setPageNumber(initialPage && initialPage > 0 ? initialPage : 1);
-    setLoadError(null);
-    setZoom(1);
-  }, [fileUrl, initialPage]);
 
   // Track the actual rendered width of the preview area so the page
   // scales to fill it — react-pdf renders at a fixed pixel width unless

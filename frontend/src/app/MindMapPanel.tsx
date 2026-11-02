@@ -143,11 +143,26 @@ export default function MindMapPanel({
     const svg = svgRef.current;
     if (!svg) return;
     const colors = darkMode
-      ? { text: '#e2e8f0', circle: '#0f172a', highlight: '#312e81' }
-      : { text: '#1e293b', circle: '#ffffff', highlight: '#e0e7ff' };
+      ? {
+          text: '#e2e8f0',
+          circle: '#0f172a',
+          highlight: '#312e81',
+          border: '#cbd5e1',
+          line: '#64748b',
+        }
+      : {
+          text: '#0f172a',
+          circle: '#ffffff',
+          highlight: '#e0e7ff',
+          border: '#1e293b',
+          line: '#94a3b8',
+        };
     svg.style.setProperty('--markmap-text-color', colors.text);
     svg.style.setProperty('--markmap-circle-open-bg', colors.circle);
     svg.style.setProperty('--markmap-highlight-node-bg', colors.highlight);
+    svg.style.setProperty('--markmap-node-border-color', colors.border);
+    svg.style.setProperty('--markmap-branch-color', colors.line);
+    svg.style.setProperty('--markmap-branch-width', '1.4');
     markmapRef.current?.updateStyle();
   }, [darkMode, data]);
 

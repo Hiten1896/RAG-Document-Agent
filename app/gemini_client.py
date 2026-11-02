@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -36,6 +37,29 @@ class LLMResult:
     provider: str
     model: str
     attempts: List[Dict[str, Any]]
+
+
+@dataclass
+class LLMStreamResult:
+    first_chunk: str
+    chunks: Iterator[str]
+    provider: str
+    model: str
+    attempts: List[Dict[str, Any]]
+
+
+def _chunk_to_text(chunk: Any) -> str:
+    content = getattr(chunk, "content", chunk)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            block if isinstance(block, str) else block.get("text", "")
+            for block in content
+            if isinstance(block, str)
+            or isinstance(block, dict) and isinstance(block.get("text"), str)
+        )
+    return ""
 
 
 def _parse_csv_env(value: Optional[str]) -> List[str]:
@@ -159,6 +183,76 @@ class GeminiClient:
             attempts=attempts,
         )
 
+    def open_stream(self, prompt: str) -> LLMStreamResult:
+        last_kind = "unknown"
+        last_error: Optional[Exception] = None
+        attempts: List[Dict[str, Any]] = []
+        start_key_index = self._current_key_index
+        for model in self.models:
+            for offset in range(len(self.api_keys)):
+                key_index = (start_key_index + offset) % len(self.api_keys)
+                started = time.perf_counter()
+                iterator: Optional[Iterator[Any]] = None
+                try:
+                    iterator = iter(
+                        self._client_for(model, self.api_keys[key_index]).stream(prompt)
+                    )
+                    first_chunk = ""
+                    for chunk in iterator:
+                        first_chunk = _chunk_to_text(chunk)
+                        if first_chunk:
+                            break
+                    if not first_chunk:
+                        raise RuntimeError("Gemini stream returned no text.")
+
+                    self._current_key_index = key_index
+                    attempts.append(
+                        {
+                            "provider": "gemini",
+                            "model": model,
+                            "status": "success",
+                            "ms": round((time.perf_counter() - started) * 1000),
+                        }
+                    )
+
+                    def remaining_chunks(
+                        stream_iterator: Iterator[Any] = iterator,
+                    ) -> Iterator[str]:
+                        try:
+                            for chunk in stream_iterator:
+                                text = _chunk_to_text(chunk)
+                                if text:
+                                    yield text
+                        finally:
+                            close = getattr(stream_iterator, "close", None)
+                            if callable(close):
+                                close()
+
+                    return LLMStreamResult(
+                        first_chunk, remaining_chunks(), "gemini", model, attempts
+                    )
+                except Exception as exc:
+                    if iterator is not None:
+                        close = getattr(iterator, "close", None)
+                        if callable(close):
+                            close()
+                    last_error = exc
+                    last_kind = self._classify(str(exc))
+                    attempts.append(
+                        {
+                            "provider": "gemini",
+                            "model": model,
+                            "status": last_kind,
+                            "ms": round((time.perf_counter() - started) * 1000),
+                        }
+                    )
+        raise GeminiExhaustedError(
+            "All Gemini models/keys exhausted.",
+            kind=last_kind,
+            last_error=last_error,
+            attempts=attempts,
+        )
+
 
 class GroqClient:
     base_url = "https://api.groq.com/openai/v1"
@@ -238,6 +332,89 @@ class GroqClient:
             ],
         )
 
+    def open_stream(self, prompt: str) -> LLMStreamResult:
+        started = time.perf_counter()
+        response = self._session.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json={
+                "model": self.model,
+                "temperature": self.temperature,
+                "tools": [],
+                "max_tokens": 600,
+                "reasoning_format": "hidden",
+                "stream": True,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=(15, 60),
+            stream=True,
+        )
+        try:
+            if response.status_code in {401, 403}:
+                raise ProviderUnavailableError("Groq authentication failed.")
+            if response.status_code == 429:
+                raise ProviderUnavailableError("Groq rate limit reached.")
+            if response.status_code >= 500:
+                raise ProviderUnavailableError("Groq service unavailable.")
+            response.raise_for_status()
+
+            def read_chunks() -> Iterator[str]:
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    if isinstance(line, bytes):
+                        line = line.decode("utf-8", errors="replace")
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        return
+                    payload = json.loads(data)
+                    choices = payload.get("choices") or []
+                    if not choices:
+                        continue
+                    content = (choices[0].get("delta") or {}).get("content")
+                    if isinstance(content, str) and content:
+                        yield content
+                    elif isinstance(content, list):
+                        text = "".join(
+                            block.get("text", "")
+                            for block in content
+                            if isinstance(block, dict)
+                            and isinstance(block.get("text"), str)
+                        )
+                        if text:
+                            yield text
+
+            iterator = iter(read_chunks())
+            first_chunk = next(iterator, "")
+            if not first_chunk:
+                raise ProviderUnavailableError("Groq stream returned no text.")
+
+            def remaining_chunks() -> Iterator[str]:
+                try:
+                    yield from iterator
+                finally:
+                    response.close()
+
+            return LLMStreamResult(
+                first_chunk,
+                remaining_chunks(),
+                "groq",
+                self.model,
+                [
+                    {
+                        "provider": "groq",
+                        "model": self.model,
+                        "status": "success",
+                        "ms": round((time.perf_counter() - started) * 1000),
+                    }
+                ],
+            )
+        except Exception:
+            response.close()
+            raise
+
 
 class LLMClient:
     def __init__(self):
@@ -312,3 +489,67 @@ class LLMClient:
                 elif "authentication" in str(exc).lower():
                     self._disabled_until_restart.add(provider)
         raise ProviderUnavailableError("All configured LLM providers are unavailable.") from last_error
+
+    def open_stream(
+        self, prompt: str, groq_prompt: Optional[str] = None
+    ) -> LLMStreamResult:
+        attempts: List[Dict[str, Any]] = []
+        last_error: Optional[Exception] = None
+        for provider in self.provider_order:
+            client = self._provider_client(provider)
+            if client is None or provider in self._disabled_until_restart:
+                continue
+            if self._disabled_until.get(provider, 0) > time.monotonic():
+                continue
+
+            model = getattr(client, "model", "configured")
+            attempt_started = time.perf_counter()
+            try:
+                provider_prompt = (
+                    groq_prompt
+                    if provider == "groq" and groq_prompt
+                    else prompt
+                )
+                result = client.open_stream(provider_prompt)
+                result.attempts = attempts + result.attempts
+                return result
+            except GeminiExhaustedError as exc:
+                last_error = exc
+                attempts.extend(exc.attempts)
+                if exc.kind == "quota":
+                    self._disabled_until[provider] = time.monotonic() + 600
+                elif exc.kind == "auth":
+                    self._disabled_until_restart.add(provider)
+            except (ProviderUnavailableError, requests.RequestException) as exc:
+                last_error = exc
+                status = "429" if "rate limit" in str(exc).lower() else "unavailable"
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "status": status,
+                        "ms": round((time.perf_counter() - attempt_started) * 1000),
+                    }
+                )
+                if status == "429":
+                    self._disabled_until[provider] = time.monotonic() + 600
+                elif "authentication" in str(exc).lower():
+                    self._disabled_until_restart.add(provider)
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "%s stream failed before its first text chunk: %s",
+                    provider,
+                    type(exc).__name__,
+                )
+                attempts.append(
+                    {
+                        "provider": provider,
+                        "model": model,
+                        "status": "unavailable",
+                        "ms": round((time.perf_counter() - attempt_started) * 1000),
+                    }
+                )
+        raise ProviderUnavailableError(
+            "All configured LLM providers are unavailable."
+        ) from last_error

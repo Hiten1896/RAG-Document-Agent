@@ -48,11 +48,20 @@ class FakeVectorStore:
         self, embedding, k, filter
     ):
         self.search_args = (embedding, k, filter)
-        conditions = filter["$and"]
-        session_filter = conditions[0]["$and"]
-        session_id = session_filter[0]["session_id"]["$eq"]
-        chat_id = session_filter[1]["chat_id"]["$eq"]
-        file_name = conditions[1]["file_name"]["$eq"]
+        def flatten_conditions(where):
+            for key, condition in where.items():
+                if key == "$and":
+                    for child in condition:
+                        yield from flatten_conditions(child)
+                else:
+                    yield key, condition
+
+        filter_values = {
+            key: condition["$eq"] for key, condition in flatten_conditions(filter)
+        }
+        session_id = filter_values["session_id"]
+        chat_id = filter_values["chat_id"]
+        file_name = filter_values.get("file_name")
         return [
             (
                 SimpleNamespace(page_content=text, metadata=metadata),
@@ -63,7 +72,7 @@ class FakeVectorStore:
             )
             if metadata["session_id"] == session_id
             and metadata["chat_id"] == chat_id
-            and metadata["file_name"] == file_name
+            and (file_name is None or metadata["file_name"] == file_name)
         ][:k]
 
 
@@ -78,13 +87,14 @@ class FakeEmbeddings:
 
 class FakeLLM:
     def __init__(self, response):
-        self.response = response
+        self.responses = response if isinstance(response, list) else [response]
         self.prompts = []
 
     def invoke(self, prompt, groq_prompt=None, forced_provider=None):
         self.prompts.append(prompt)
+        response = self.responses[min(len(self.prompts) - 1, len(self.responses) - 1)]
         return LLMResult(
-            response=self.response,
+            response=response,
             provider="groq",
             model="test-model",
             attempts=[{"provider": "groq", "model": "test-model", "status": "success"}],
@@ -247,6 +257,185 @@ class MindMapEndpointTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(len(llm.prompts), 2)
+
+    def test_mindmap_accepts_fenced_json_and_only_returns_debug_when_requested(self):
+        map_json = json.dumps(
+            {
+                "title": "Zorvania institute",
+                "children": [
+                    {
+                        "title": "Founded in 1987",
+                        "source": "page 1",
+                        "children": [],
+                    }
+                ],
+            }
+        )
+        llm = FakeLLM(f"```json\n{map_json}\n```")
+        vector_store = FakeVectorStore()
+        vector_store.add_texts(
+            ["The Zorvania Institute was founded in 1987 by Dr. Anita Mehra."],
+            [
+                {
+                    "session_id": "fenced",
+                    "chat_id": "chat",
+                    "file_name": "facts.txt",
+                    "location": "page 1",
+                    "page": 1,
+                    "chunk_index": 0,
+                }
+            ],
+        )
+        with (
+            patch.object(main, "vector_store", vector_store),
+            patch.object(main, "_llm_client", llm),
+            patch.object(main, "_llm_error", None),
+            patch.object(main, "MINDMAP_CACHE", {}),
+            TestClient(main.app) as client,
+        ):
+            headers = {"X-Session-Id": "fenced", "X-Chat-Id": "chat"}
+            without_debug = client.post("/api/mindmap", headers=headers, json={})
+            with_debug = client.post(
+                "/api/mindmap",
+                headers={**headers, "X-Debug": "true"},
+                json={},
+            )
+
+        self.assertEqual(without_debug.status_code, 200)
+        self.assertNotIn("debug", without_debug.json())
+        self.assertNotIn("x-debug", without_debug.headers)
+        self.assertEqual(with_debug.status_code, 200)
+        self.assertEqual(with_debug.headers["x-debug"], "true")
+        self.assertEqual(with_debug.json()["debug"]["provider"], "groq")
+        self.assertTrue(with_debug.json()["debug"]["cache_hit"])
+        self.assertEqual(len(llm.prompts), 1)
+
+    def test_mindmap_does_not_read_or_mix_chunks_from_another_chat(self):
+        llm = FakeLLM(
+            [
+                json.dumps(
+                    {
+                        "title": "Chat one",
+                        "children": [{"title": "First fact", "children": []}],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "title": "Chat two",
+                        "children": [{"title": "Second fact", "children": []}],
+                    }
+                ),
+            ]
+        )
+        vector_store = FakeVectorStore()
+        vector_store.add_texts(
+            [
+                "Chat one document: the observatory is in Blenth and the research "
+                "team records climate measurements every month.",
+                "Chat two private document: the vault code is 4816 and access "
+                "requires approval from the security department.",
+            ],
+            [
+                {
+                    "session_id": "isolated",
+                    "chat_id": "one",
+                    "file_name": "one.txt",
+                    "location": "document",
+                    "chunk_index": 0,
+                },
+                {
+                    "session_id": "isolated",
+                    "chat_id": "two",
+                    "file_name": "two.txt",
+                    "location": "document",
+                    "chunk_index": 0,
+                },
+            ],
+        )
+        with (
+            patch.object(main, "vector_store", vector_store),
+            patch.object(main, "_llm_client", llm),
+            patch.object(main, "_llm_error", None),
+            patch.object(main, "MINDMAP_CACHE", {}),
+            TestClient(main.app) as client,
+        ):
+            first = client.post(
+                "/api/mindmap",
+                headers={"X-Session-Id": "isolated", "X-Chat-Id": "one"},
+                json={},
+            )
+            second = client.post(
+                "/api/mindmap",
+                headers={"X-Session-Id": "isolated", "X-Chat-Id": "two"},
+                json={},
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertIn("observatory is in Blenth", llm.prompts[0])
+        self.assertNotIn("vault code", llm.prompts[0])
+        self.assertIn("vault code is 4816", llm.prompts[1])
+        self.assertNotIn("observatory is in Blenth", llm.prompts[1])
+
+    def test_large_mindmap_document_uses_bounded_map_reduce_and_debug(self):
+        map_json = json.dumps(
+            {
+                "title": "Large handbook",
+                "children": [{"title": "Grounded summary", "children": []}],
+            }
+        )
+        llm = FakeLLM(
+            [
+                "First group summary: the handbook describes procedures and rules. "
+                "It also covers responsibilities and safety practices.",
+                "Second group summary: the handbook describes departments and "
+                "resources. It also covers review and reporting processes.",
+                map_json,
+            ]
+        )
+        vector_store = FakeVectorStore()
+        chunks = [
+            f"Section {index} describes policy detail. " + ("grounded content " * 35)
+            for index in range(24)
+        ]
+        metadata = [
+            {
+                "session_id": "large",
+                "chat_id": "chat",
+                "file_name": "handbook.txt",
+                "location": f"page {index + 1}",
+                "page": index + 1,
+                "chunk_index": index,
+            }
+            for index in range(24)
+        ]
+        vector_store.add_texts(chunks, metadata)
+
+        with (
+            patch.object(main, "vector_store", vector_store),
+            patch.object(main, "_llm_client", llm),
+            patch.object(main, "_llm_error", None),
+            patch.object(main, "MINDMAP_CACHE", {}),
+            TestClient(main.app) as client,
+        ):
+            response = client.post(
+                "/api/mindmap",
+                headers={
+                    "X-Session-Id": "large",
+                    "X-Chat-Id": "chat",
+                    "X-Debug": "true",
+                },
+                json={},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-debug"], "true")
+        self.assertGreater(response.json()["debug"]["chunks_used"], 1)
+        self.assertLessEqual(response.json()["debug"]["chunks_used"], 24)
+        self.assertEqual(len(llm.prompts), 3)
+        self.assertTrue(all(len(prompt) <= main.GROQ_MAX_CONTEXT_CHARS for prompt in llm.prompts))
+        self.assertIn("Summarize each labeled location", llm.prompts[0])
+        self.assertIn("Create a mind map", llm.prompts[-1])
 
     def test_topic_mindmap_uses_session_and_file_filtered_similarity_search(self):
         llm = FakeLLM(
