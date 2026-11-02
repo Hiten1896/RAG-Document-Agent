@@ -13,7 +13,7 @@ the backend restarts.
 
 - Strict, document-grounded question answering with source evidence and refusal
   for unsupported questions.
-- Interactive mind maps, citation navigation, and lazy follow-up suggestions.
+- Interactive mind maps, grounded visual answers, citation navigation, and lazy follow-up suggestions.
 - Chat and answer export to Word or browser-generated PDF.
 - Optional token streaming; disabled by default until Render buffering is
   verified.
@@ -89,6 +89,7 @@ prompt.
 - `POST /api/quiz` generates 1–10 multiple-choice questions from the active chat's documents.
 - `POST /api/compare` compares two files with separate per-file retrieval and citations.
 - `POST /api/mindmap` generates a structured mind map from the active chat's documents.
+- `POST /api/visual` generates a grounded diagram, visual explanation, or chart (`kind` is `diagram`, `explainer`, or `chart`; optional `topic` enables similarity retrieval).
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
 Use `X-Session-Id` and `X-Chat-Id` on ingest/query/stream/followups/quiz/compare/mindmap. Add
@@ -109,6 +110,11 @@ reports per-file chunk and context counts.
 Query sources carry a numeric `page` where available and a `location` label for
 slides, sheets, or unpaginated text; the frontend uses these fields for citation
 navigation.
+
+Visual answers are available from **Visualize**: diagrams, visual explanation
+cards, and small document-number charts. They use the active chat's session
+filter, keep a source label on every visual item, render model text as plain
+text, and refuse chart values that are not present in retrieved context.
 
 Mind maps are cached in memory per session, chat, document set, and topic; they
 are cleared with the chat and expire with its normal session cleanup. They need

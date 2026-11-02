@@ -80,6 +80,18 @@ class VisualEndpointTests(unittest.TestCase):
         self.assertEqual(result["glossary"][0]["source"], "page 1")
         self.assertNotIn("Paris", json.dumps(result))
 
+    def test_chart_accepts_numbers_that_are_present_in_context(self):
+        vector = FakeVectorStore()
+        metadata, text = stored("visual", "chat", "Quarterly output was 12 in Q1 and 18 in Q2.")
+        vector.add_texts([text], [metadata])
+        llm = FakeLLM(json.dumps({
+            "type": "bar", "title": "Quarterly output", "labels": ["Q1", "Q2"],
+            "values": [12, 18], "source": "page 1"
+        }))
+        response = self.request({"kind": "chart"}, llm, vector)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["values"], [12.0, 18.0])
+
     def test_bad_json_gets_one_repair_retry(self):
         vector = FakeVectorStore()
         metadata, text = stored("visual", "chat", "The institute was founded in 1987.")

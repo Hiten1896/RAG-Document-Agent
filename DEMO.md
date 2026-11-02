@@ -21,6 +21,9 @@
 9. Use **Export this answer** to save one answer and **Export chat** to save the
    conversation. Try both Word and PDF; open Show evidence first to include
    retrieved passages, and generate a mind map to include its image.
+3. Open **Visualize** and try **Diagram**, **Explain visually**, and **Chart**.
+   Confirm that sources are shown on visual items, invented chart numbers are
+   refused, and diagrams can be downloaded as SVG or PNG.
 10. If the deployed Render service has passed the SSE buffering check and
    `NEXT_PUBLIC_ENABLE_STREAMING=true`, ask a question and show tokens arriving,
    the Stop control, and the final evidence panel. Otherwise the standard

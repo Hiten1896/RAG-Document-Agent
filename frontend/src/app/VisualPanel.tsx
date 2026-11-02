@@ -29,6 +29,17 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+async function downloadSvgAsPng(svg: string, filename: string) {
+  const image = new Image();
+  image.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error('Could not render PNG.')); });
+  const canvas = document.createElement('canvas');
+  canvas.width = image.width * 2;
+  canvas.height = image.height * 2;
+  canvas.getContext('2d')?.drawImage(image, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob((blob) => { if (blob) downloadBlob(blob, filename); }, 'image/png');
+}
+
 function DiagramView({ data }: { data: VisualDiagram }) {
   const host = useRef<HTMLDivElement>(null);
   const [svg, setSvg] = useState('');
@@ -49,7 +60,7 @@ function DiagramView({ data }: { data: VisualDiagram }) {
       <div ref={host} className="visual-mermaid flex min-h-64 items-center justify-center overflow-auto rounded-xl bg-white p-4 dark:bg-slate-950" aria-label="Generated diagram" />
       <div className="mt-3 flex gap-2">
         <button type="button" disabled={!svg} onClick={() => downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), 'visual-diagram.svg')} className="visual-download"><Download className="h-3.5 w-3.5" />SVG</button>
-        <button type="button" disabled={!svg} onClick={() => downloadBlob(new Blob([svg], { type: 'image/svg+xml' }), 'visual-diagram.png')} className="visual-download"><Download className="h-3.5 w-3.5" />PNG</button>
+        <button type="button" disabled={!svg} onClick={() => void downloadSvgAsPng(svg, 'visual-diagram.png')} className="visual-download"><Download className="h-3.5 w-3.5" />PNG</button>
       </div>
       <div className="mt-4 space-y-2 text-sm">{data.nodes.map((node) => <div key={node.id} className="flex justify-between gap-3 rounded-lg border border-slate-200 p-2 dark:border-slate-700"><span>{node.label}</span><Source value={node.source} /></div>)}</div>
     </>
