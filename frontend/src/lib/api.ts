@@ -255,6 +255,57 @@ export interface MindMapOptions {
   regenerate?: boolean;
 }
 
+export type VisualKind = 'diagram' | 'explainer' | 'chart';
+
+export interface VisualDiagram {
+  kind?: 'diagram';
+  type: 'flowchart' | 'timeline' | 'hierarchy' | 'cause_effect';
+  nodes: Array<{ id: string; label: string; source: string }>;
+  edges: Array<{ from: string; to: string; label: string }>;
+  mermaid: string;
+}
+
+export interface VisualExplainer {
+  kind?: 'explainer';
+  title: string;
+  summary: { text: string; source: string };
+  key_points: Array<{ text: string; source: string }>;
+  steps: Array<{ text: string; source: string }>;
+  key_numbers: Array<{ label: string; value: string; source: string }>;
+  glossary: Array<{ term: string; definition: string; source: string }>;
+}
+
+export interface VisualChart {
+  kind?: 'chart';
+  type: 'bar' | 'line' | 'pie';
+  title: string;
+  labels: string[];
+  values: number[];
+  source: string;
+}
+
+export type VisualResponse = VisualDiagram | VisualExplainer | VisualChart;
+
+export async function generateVisual(
+  kind: VisualKind,
+  chatId?: string,
+  topic?: string,
+): Promise<VisualResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}/visual`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...sessionHeaders(chatId) },
+      body: JSON.stringify({ kind, ...(topic?.trim() ? { topic: topic.trim() } : {}) }),
+      signal: timeoutSignal(MINDMAP_TIMEOUT_MS),
+    });
+  } catch (err) {
+    describeNetworkError(err, 'Visual generation timed out. Please try again.');
+  }
+  if (!response.ok) throw await parseErrorResponse(response, 'Failed to generate the visual.');
+  return response.json();
+}
+
 export interface QueryDebugChunk {
   text: string;
   source?: string;

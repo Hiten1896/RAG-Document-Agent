@@ -11,6 +11,7 @@ import {
   STREAMING_ENABLED,
   generateFollowups,
   generateMindMap,
+  generateVisual,
   generateQuiz,
   compareDocuments,
   clearSession,
@@ -21,6 +22,8 @@ import {
   QuizDifficulty,
   QuizResponse,
   CompareResponse,
+  VisualKind,
+  VisualResponse,
 } from '@/lib/api';
 import {
   createMindMapImage,
@@ -115,6 +118,10 @@ const QuizPanel = dynamic(() => import('./QuizPanel'), {
 });
 
 const ComparePanel = dynamic(() => import('./ComparePanel'), {
+  ssr: false,
+});
+
+const VisualPanel = dynamic(() => import('./VisualPanel'), {
   ssr: false,
 });
 
@@ -279,6 +286,7 @@ const ANALYSIS_PRESETS = [
     isMindMap: false,
     isQuiz: false,
     isCompare: false,
+    isVisual: undefined,
   },
   {
     label: 'Mind map',
@@ -288,6 +296,37 @@ const ANALYSIS_PRESETS = [
     isMindMap: true,
     isQuiz: false,
     isCompare: false,
+    isVisual: undefined,
+  },
+  {
+    label: 'Diagram',
+    hint: 'Flowcharts and relationships',
+    prompt: '',
+    icon: GitBranch,
+    isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
+    isVisual: 'diagram' as VisualKind,
+  },
+  {
+    label: 'Explain visually',
+    hint: 'Cards, steps, and key numbers',
+    prompt: '',
+    icon: ImageIcon,
+    isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
+    isVisual: 'explainer' as VisualKind,
+  },
+  {
+    label: 'Chart',
+    hint: 'Plot document numbers',
+    prompt: '',
+    icon: GitCompareArrows,
+    isMindMap: false,
+    isQuiz: false,
+    isCompare: false,
+    isVisual: 'chart' as VisualKind,
   },
   {
     label: 'Quiz me',
@@ -730,6 +769,11 @@ export default function Home() {
   const [mindMapError, setMindMapError] = useState<string | null>(null);
   const [mindMapTopic, setMindMapTopic] = useState('');
   const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
+  const [visualKind, setVisualKind] = useState<VisualKind | null>(null);
+  const [visualData, setVisualData] = useState<VisualResponse | null>(null);
+  const [visualLoading, setVisualLoading] = useState(false);
+  const [visualError, setVisualError] = useState<string | null>(null);
+  const [visualConversationId, setVisualConversationId] = useState(activeConversationId);
   const [quizOpen, setQuizOpen] = useState(false);
   const [quizData, setQuizData] = useState<QuizResponse | null>(null);
   const [quizLoading, setQuizLoading] = useState(false);
@@ -1363,6 +1407,28 @@ export default function Home() {
     }
   };
 
+  const handleGenerateVisual = async (kind: VisualKind, topic = '') => {
+    const targetConversationId = activeConversationId;
+    setVisualKind(kind);
+    setVisualConversationId(targetConversationId);
+    setVisualData(null);
+    setVisualError(null);
+    setVisualLoading(true);
+    if (!ingestedFiles.some((file) => file.chatId === targetConversationId && file.status === 'completed')) {
+      setVisualError('Upload a document to create a grounded visual.');
+      setVisualLoading(false);
+      return;
+    }
+    try {
+      const result = await generateVisual(kind, targetConversationId, topic);
+      if (activeConversationId === targetConversationId) setVisualData(result);
+    } catch (err: unknown) {
+      if (activeConversationId === targetConversationId) setVisualError(getErrorMessage(err, 'Could not generate the visual.'));
+    } finally {
+      if (activeConversationId === targetConversationId) setVisualLoading(false);
+    }
+  };
+
   const handleOpenQuiz = () => {
     if (
       !ingestedFiles.some(
@@ -1500,6 +1566,8 @@ export default function Home() {
     }
     if (preset.isMindMap) {
       void handleGenerateMindMap();
+    } else if (preset.isVisual) {
+      void handleGenerateVisual(preset.isVisual);
     } else {
       void handleSendQuery(undefined, preset.prompt);
     }
@@ -1510,6 +1578,15 @@ export default function Home() {
     if (e) e.preventDefault();
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
+
+    const visualMatch = requestedQuery.trim().match(/^(?:draw|show|make|create)\s+(?:a\s+)?(flowchart|diagram|timeline|chart|visual explanation)\b\s*(.*)$/i);
+    if (visualMatch) {
+      const visualType = visualMatch[1].toLowerCase();
+      const kind: VisualKind = visualType === 'chart' ? 'chart' : visualType === 'visual explanation' ? 'explainer' : 'diagram';
+      await handleGenerateVisual(kind, visualMatch[2]);
+      setQuery('');
+      return;
+    }
 
     const userText = requestedQuery.trim();
     const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
@@ -2413,6 +2490,15 @@ export default function Home() {
                     );
                   })}
                 </div>
+                <details className="mt-3 rounded-xl border border-slate-200 bg-white p-2 text-left dark:border-slate-700 dark:bg-slate-900">
+                  <summary className="cursor-pointer list-none px-2 py-1 text-xs font-semibold text-slate-700 dark:text-slate-300">Visualize</summary>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {ANALYSIS_PRESETS.filter((preset) => preset.isMindMap || preset.isVisual).map((preset) => {
+                      const Icon = preset.icon;
+                      return <button key={`visual-${preset.label}`} type="button" onClick={() => handleAnalysisPreset(preset)} className="flex min-h-10 items-center gap-2 rounded-lg px-2 py-2 text-left text-xs text-slate-700 hover:bg-indigo-50 dark:text-slate-300 dark:hover:bg-indigo-500/10"><Icon className="h-3.5 w-3.5 text-indigo-600" />{preset.label}</button>;
+                    })}
+                  </div>
+                </details>
                 {suggestionNotice && (
                   <p role="status" aria-live="polite" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
                     {suggestionNotice}
@@ -3111,6 +3197,17 @@ export default function Home() {
           onClose={() => setMindMapOpen(false)}
           onRetry={() => void handleGenerateMindMap(mindMapTopic)}
           onRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
+        />
+      )}
+
+      {visualKind && visualConversationId === activeConversationId && (
+        <VisualPanel
+          kind={visualKind}
+          data={visualData}
+          loading={visualLoading}
+          error={visualError}
+          onClose={() => setVisualKind(null)}
+          onRetry={() => void handleGenerateVisual(visualKind)}
         />
       )}
 

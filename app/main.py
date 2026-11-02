@@ -101,6 +101,8 @@ MINDMAP_MAX_TEXT_CHARS = 10000
 MINDMAP_MAX_NODES = 40
 MINDMAP_MAX_CHILD_DEPTH = 3
 MINDMAP_CACHE_MAX_ENTRIES = 100
+VISUAL_MAX_CHUNKS = 24
+VISUAL_MAX_CONTEXT_CHARS = 9000
 QUIZ_MAX_CHUNKS = 10
 QUIZ_MAX_TEXT_CHARS = 10000
 COMPARE_RETRIEVAL_K = 4
@@ -415,6 +417,11 @@ class MindMapRequest(BaseModel):
     regenerate: bool = False
 
 
+class VisualRequest(BaseModel):
+    kind: Literal["diagram", "explainer", "chart"]
+    topic: Optional[str] = Field(default=None, max_length=300)
+
+
 class FollowupsRequest(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
 
@@ -481,6 +488,83 @@ class MindMapNode(BaseModel):
 class MindMapResponse(BaseModel):
     title: str
     children: List[MindMapNode] = Field(default_factory=list)
+
+
+class DiagramNode(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    source: str = Field(min_length=1, max_length=500)
+
+
+class DiagramEdge(BaseModel):
+    from_: str = Field(alias="from", min_length=1, max_length=80)
+    to: str = Field(min_length=1, max_length=80)
+    label: str = Field(default="", max_length=120)
+
+    model_config = {"populate_by_name": True}
+
+
+class DiagramResponse(BaseModel):
+    type: Literal["flowchart", "timeline", "hierarchy", "cause_effect"]
+    nodes: List[DiagramNode] = Field(min_length=1, max_length=20)
+    edges: List[DiagramEdge] = Field(default_factory=list, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_graph(self) -> "DiagramResponse":
+        ids = [node.id for node in self.nodes]
+        if len(set(ids)) != len(ids):
+            raise ValueError("Diagram node ids must be unique.")
+        if any(len(node.label.split()) > 8 for node in self.nodes):
+            raise ValueError("Diagram labels must be at most 8 words.")
+        known = set(ids)
+        if any(edge.from_ not in known or edge.to not in known for edge in self.edges):
+            raise ValueError("Diagram edges must refer to existing node ids.")
+        return self
+
+
+class VisualPoint(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    source: str = Field(min_length=1, max_length=500)
+
+
+class VisualStep(BaseModel):
+    text: str = Field(min_length=1, max_length=500)
+    source: str = Field(min_length=1, max_length=500)
+
+
+class VisualNumber(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=80)
+    source: str = Field(min_length=1, max_length=500)
+
+
+class GlossaryEntry(BaseModel):
+    term: str = Field(min_length=1, max_length=120)
+    definition: str = Field(min_length=1, max_length=500)
+    source: str = Field(min_length=1, max_length=500)
+
+
+class ExplainerResponse(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+    summary: VisualPoint
+    key_points: List[VisualPoint] = Field(min_length=3, max_length=6)
+    steps: List[VisualStep] = Field(default_factory=list, max_length=12)
+    key_numbers: List[VisualNumber] = Field(default_factory=list, max_length=8)
+    glossary: List[GlossaryEntry] = Field(default_factory=list, max_length=12)
+
+
+class ChartResponse(BaseModel):
+    type: Literal["bar", "line", "pie"]
+    title: str = Field(min_length=1, max_length=160)
+    labels: List[str] = Field(min_length=1, max_length=20)
+    values: List[float] = Field(min_length=1, max_length=20)
+    source: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_lengths(self) -> "ChartResponse":
+        if len(self.labels) != len(self.values):
+            raise ValueError("Chart labels and values must have the same length.")
+        return self
 
 
 class _ThinkTagFilter:
@@ -737,6 +821,42 @@ def _format_labeled_context(items: List[Dict[str, Any]]) -> str:
         f"[{_source_label(item['metadata'])}]\n{item['text']}"
         for item in items
     )
+
+
+def _visual_source(item: Dict[str, Any]) -> str:
+    return str(item["metadata"].get("location") or "document")
+
+
+def _visual_context(items: List[Dict[str, Any]]) -> str:
+    return "\n\n".join(
+        f"[{_source_label(item['metadata'])} | source={_visual_source(item)}]\n{item['text']}"
+        for item in items
+    )
+
+
+def _escape_mermaid_label(value: str) -> str:
+    return re.sub(r"[\r\n\[\]{}<>|;]", " ", value).replace('"', "'").strip() or "Untitled"
+
+
+def _diagram_mermaid(diagram: DiagramResponse) -> str:
+    direction = "TD" if diagram.type in {"hierarchy", "cause_effect"} else "LR"
+    lines = [f"flowchart {direction}"]
+    for node in diagram.nodes:
+        lines.append(f'    {node.id}["{_escape_mermaid_label(node.label)}"]')
+    for edge in diagram.edges:
+        suffix = f'|"{_escape_mermaid_label(edge.label)}"|' if edge.label.strip() else ""
+        lines.append(f"    {edge.from_} -->{suffix} {edge.to}")
+    return "\n".join(lines)
+
+
+def _number_tokens(value: float) -> set[str]:
+    rendered = f"{value:g}"
+    return {rendered, rendered.replace(".", ","), f"{value:,.12g}"}
+
+
+def _chart_value_in_context(value: float, context: str) -> bool:
+    compact = re.sub(r"(?<=\d)[, ](?=\d)", "", context)
+    return any(re.search(rf"(?<![\d.]){re.escape(token)}(?![\d.])", compact) for token in _number_tokens(value))
 
 
 def _normalize_quiz_evidence(value: str) -> str:
@@ -2024,6 +2144,115 @@ async def generate_mindmap(
         response.headers["X-Debug"] = "true"
         return {**map_dict, "debug": debug_data}
     return map_dict
+
+
+@app.post("/api/visual")
+async def generate_visual(
+    payload: VisualRequest,
+    response: Response,
+    x_session_id: Optional[str] = Header(default="default_session"),
+    x_chat_id: Optional[str] = Header(default="default_chat"),
+    x_debug: bool = Header(default=False),
+):
+    """Generate one small, grounded visual from one isolated chat."""
+    started = time.perf_counter()
+    topic = (payload.topic or "").strip()
+    touch_session(x_session_id, x_chat_id)
+    try:
+        stored = await asyncio.to_thread(
+            vector_store._collection.get,
+            where=session_filter(x_session_id, x_chat_id),
+            include=["documents", "metadatas"],
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Could not read uploaded document context.") from exc
+
+    all_items = [
+        {"text": text or "", "metadata": metadata or {}}
+        for text, metadata in zip(stored.get("documents") or [], stored.get("metadatas") or [])
+        if isinstance(text, str) and text.strip()
+    ]
+    all_items.sort(key=lambda item: (str(item["metadata"].get("file_name", "")), int(item["metadata"].get("chunk_index", 0))))
+    if not all_items:
+        raise HTTPException(status_code=400, detail="Upload a document before generating a visual.")
+
+    embedding_ms = 0
+    if topic:
+        if jina_embeddings is None:
+            raise HTTPException(status_code=503, detail="Embedding service is not configured (JINA_API_KEY is missing).")
+        embed_started = time.perf_counter()
+        try:
+            query_embedding = await asyncio.to_thread(jina_embeddings.embed_query, topic)
+            scored = await asyncio.to_thread(
+                vector_store.similarity_search_by_vector_with_relevance_scores,
+                query_embedding,
+                VISUAL_MAX_CHUNKS,
+                filter=session_filter(x_session_id, x_chat_id),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Could not retrieve document context for that topic.") from exc
+        embedding_ms = round((time.perf_counter() - embed_started) * 1000)
+        items = [{"text": doc.page_content, "metadata": doc.metadata} for doc, _ in scored if doc.page_content.strip()]
+    else:
+        items = _evenly_sample(all_items, VISUAL_MAX_CHUNKS)
+    items = _clip_context(items, VISUAL_MAX_CONTEXT_CHARS)
+    context = _visual_context(items)
+    allowed_sources = sorted({_visual_source(item) for item in items}) or ["document"]
+    source_json = json.dumps(allowed_sources, ensure_ascii=False)
+    grounding = (
+        "Use only the supplied document context. Never use outside knowledge. "
+        "Every source must exactly match one allowed source label. If the context "
+        "does not support a useful result, return one honest Not enough content item. "
+        "Return JSON only, with no Markdown or HTML.\n"
+    )
+    prompts = {
+        "diagram": grounding + (
+            "Create a small grounded diagram. JSON shape: {type: flowchart|timeline|hierarchy|cause_effect, "
+            "nodes:[{id,label,source}], edges:[{from,to,label}]}. Use at most 20 nodes, unique ids, labels of at most 8 words, "
+            f"and only existing node ids in edges. Allowed sources: {source_json}.\nContext:\n{context}"
+        ),
+        "explainer": grounding + (
+            "Create visual explanation cards. JSON shape: {title, summary:{text,source}, key_points:[{text,source}], "
+            "steps:[{text,source}], key_numbers:[{label,value,source}], glossary:[{term,definition,source}]}. "
+            "Use 3 to 6 key points. Allowed sources: " + source_json + f".\nContext:\n{context}"
+        ),
+        "chart": grounding + (
+            "Create a small chart only when the context contains explicit numeric values. JSON shape: "
+            "{type:bar|line|pie,title,labels:[string],values:[number],source}. Every value must be copied from the context. "
+            "Use matching labels and values, at most 20 points. Allowed sources: " + source_json + f".\nContext:\n{context}"
+        ),
+    }
+    schemas: Dict[str, Type[BaseModel]] = {
+        "diagram": DiagramResponse,
+        "explainer": ExplainerResponse,
+        "chart": ChartResponse,
+    }
+    result, llm_results = await generate_json(prompts[payload.kind], schemas[payload.kind])
+    if len(llm_results) > 2:
+        raise HTTPException(status_code=503, detail="Visual generation exceeded its call limit.")
+
+    if payload.kind == "diagram":
+        visual = result
+        if any(node.source not in allowed_sources for node in visual.nodes):
+            raise HTTPException(status_code=502, detail="The AI service returned an ungrounded visual source.")
+        output: Dict[str, Any] = {**visual.model_dump(by_alias=True), "mermaid": _diagram_mermaid(visual)}
+    elif payload.kind == "explainer":
+        visual = result
+        sources = [visual.summary.source, *(point.source for point in visual.key_points), *(step.source for step in visual.steps), *(number.source for number in visual.key_numbers), *(entry.source for entry in visual.glossary)]
+        if any(source not in allowed_sources for source in sources):
+            raise HTTPException(status_code=502, detail="The AI service returned an ungrounded visual source.")
+        output = visual.model_dump()
+    else:
+        visual = result
+        if visual.source not in allowed_sources:
+            raise HTTPException(status_code=502, detail="The AI service returned an ungrounded chart source.")
+        if not all(_chart_value_in_context(value, context) for value in visual.values):
+            raise HTTPException(status_code=422, detail="Chart refused: one or more values were not found in the retrieved document context.")
+        output = visual.model_dump()
+    if x_debug:
+        response.headers["X-Debug"] = "true"
+        output["debug"] = {"kind": payload.kind, "topic": topic, "chunks_used": len(items), "source_labels": allowed_sources, "embedding_ms": embedding_ms, "total_ms": round((time.perf_counter() - started) * 1000), "llm_attempts": len(llm_results)}
+    return output
 
 
 @app.delete("/api/session/clear")
