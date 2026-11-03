@@ -197,25 +197,76 @@ function normalizePrompt(value: string): string {
     .trim();
 }
 
+const INTENT_PATTERNS: Array<{
+  action: PromptAction;
+  weight: number;
+  patterns: RegExp[];
+}> = [
+  {
+    action: 'mindmap',
+    weight: 5,
+    patterns: [/\bmind\s*map\b/, /\bmindmap\b/, /\bmindmapp\b/, /\bmind\s*max\b/, /\bmap\s+the\s+(document|topic|content)\b/],
+  },
+  {
+    action: 'chart',
+    weight: 5,
+    patterns: [/\b(chart|charts|chrat|char)\b/, /\bvisuali[sz]e\b/, /\bplot\b/, /\bgraph\b/],
+  },
+  {
+    action: 'quiz',
+    weight: 5,
+    patterns: [/\b(quiz|quize|quizz|questionnaire|test\s+me)\b/, /\bask\s+me\s+questions\b/],
+  },
+  {
+    action: 'compare',
+    weight: 6,
+    patterns: [/\b(compare|compar|comparison)\b/, /\b(compare|contrast)\s+(them|these|the\s+two)\b/, /\b(difference|differences)\s+between\b/],
+  },
+  {
+    action: 'summary',
+    weight: 4,
+    patterns: [/\b(summary|summarize|summrise|summry|executive\s+summary)\b/, /\btl\s*dr\b/, /\bkey\s+takeaways?\b/],
+  },
+  {
+    action: 'action_items',
+    weight: 4,
+    patterns: [/\b(action\s*items?|actions?|tasks?|todo|to\s*dos?)\b/, /\bwhat\s+(should|needs\s+to)\s+be\s+done\b/],
+  },
+  {
+    action: 'risks',
+    weight: 4,
+    patterns: [/\b(risks?|caveats?|limitations?|concerns?|red\s+flags?)\b/],
+  },
+  {
+    action: 'terms',
+    weight: 4,
+    patterns: [/\b(terms?|glossary|definitions?|concepts?)\b/, /\bexplain\s+the\s+(key\s+)?terms\b/],
+  },
+];
+
 function promptAction(value: string): PromptAction | null {
   const prompt = normalizePrompt(value);
-  if (/\b(mind\s*map|mindmap|mindmapp|mind\s*max)\b/.test(prompt)) return 'mindmap';
-  if (/\b(chart|charts|chrat|char)\b/.test(prompt)) return 'chart';
-  if (/\b(quiz|quize|quizz|questionnaire)\b/.test(prompt)) return 'quiz';
-  if (/\b(compare|compar|comparison|difference|differences)\b/.test(prompt)) return 'compare';
-  if (/\b(summary|summarize|summry|executive)\b/.test(prompt)) return 'summary';
-  if (/\b(action\s*items?|actions|tasks|todo)\b/.test(prompt)) return 'action_items';
-  if (/\b(risks?|risk|caveats?|limitations?)\b/.test(prompt)) return 'risks';
-  if (/\b(terms?|glossary|definitions?|concepts?)\b/.test(prompt)) return 'terms';
-  return null;
+  let best: { action: PromptAction; score: number } | null = null;
+  for (const intent of INTENT_PATTERNS) {
+    const matches = intent.patterns.filter((pattern) => pattern.test(prompt)).length;
+    if (!matches) continue;
+    const score = intent.weight + matches - (intent.patterns.length > 2 ? 0.1 : 0);
+    if (!best || score > best.score) best = { action: intent.action, score };
+  }
+  return best?.action ?? null;
 }
 
 function promptTopic(value: string, action: 'mindmap' | 'chart'): string {
   return normalizePrompt(value)
     .replace(/^(please|can you|could you|would you)\s+/, '')
     .replace(/^(make|create|generate|show|give|draw|build|prepare|do|run)\s+/, '')
-    .replace(action === 'mindmap' ? /\bmind\s*map\b|\bmindmap\b/ : /\bcharts?\b/, '')
-    .replace(/\b(for me|please|from the documents?|of the documents?)\b/g, '')
+    .replace(
+      action === 'mindmap'
+        ? /\bmind\s*map\b|\bmindmap\b|\bmindmapp\b|\bmind\s*max\b/
+        : /\bcharts?\b|\bchrat\b|\bchar\b/,
+      '',
+    )
+    .replace(/\b(for me|please|from the documents?|of the documents?|them|these)\b/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1510,7 +1561,9 @@ export default function Home() {
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
 
-    const action = promptAction(requestedQuery);
+    // Preset prompts are already fully formed backend instructions. Re-running
+    // intent detection on them would dispatch the same command recursively.
+    const action = presetQuery ? null : promptAction(requestedQuery);
     if (action === 'mindmap') {
       await handleGenerateMindMap(promptTopic(requestedQuery, 'mindmap'));
       setQuery('');
