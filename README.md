@@ -52,8 +52,9 @@ LLM_PROVIDER_ORDER=gemini,groq
 ```
 
 The router uses temperature `0.2`, no tools, and no search grounding. A provider
-that returns a quota/rate-limit response is placed behind a ten-minute in-memory
-circuit breaker; authentication failures are skipped until restart. Groq model
+that returns a quota/rate-limit response is placed behind a short in-memory
+circuit breaker (60–120 seconds, honoring `Retry-After`); transient 503s and
+timeouts do not block it. Authentication failures are skipped until restart. Groq model
 selection uses `GROQ_MODEL`, or discovers a general-purpose chat model when it is
 unset.
 
@@ -90,6 +91,7 @@ prompt.
 - `POST /api/compare` compares two files with separate per-file retrieval and citations.
 - `POST /api/mindmap` generates a structured mind map from the active chat's documents.
 - `POST /api/visual` generates a grounded diagram, visual explanation, or chart (`kind` is `diagram`, `explainer`, or `chart`; optional `topic` enables similarity retrieval).
+- `GET /api/llm/status` reports provider configuration, temporary block expiry, and the last safe error kind without secrets.
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
 Use `X-Session-Id` and `X-Chat-Id` on ingest/query/stream/followups/quiz/compare/mindmap. Add
@@ -111,8 +113,8 @@ Query sources carry a numeric `page` where available and a `location` label for
 slides, sheets, or unpaginated text; the frontend uses these fields for citation
 navigation.
 
-Visual answers are available from **Visualize**: diagrams, visual explanation
-cards, and small document-number charts. They use the active chat's session
+Visual answers are available from the single **Visualize** entry: diagrams,
+visual explanation cards, and small document-number charts. They use the active chat's session
 filter, keep a source label on every visual item, render model text as plain
 text, and refuse chart values that are not present in retrieved context.
 
