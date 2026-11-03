@@ -28,7 +28,10 @@ class GeminiExhaustedError(RuntimeError):
 
 
 class ProviderUnavailableError(RuntimeError):
-    pass
+    def __init__(self, message: str, kind: str = "unavailable", retry_after: Optional[float] = None):
+        super().__init__(message)
+        self.kind = kind
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -88,6 +91,14 @@ def _load_models() -> List[str]:
         if model not in models:
             models.append(model)
     return models or ["gemini-2.5-flash", "gemini-flash-latest"]
+
+
+def _retry_after(response: requests.Response) -> Optional[float]:
+    value = response.headers.get("Retry-After")
+    try:
+        return float(value) if value else None
+    except ValueError:
+        return None
 
 
 class GeminiClient:
@@ -273,7 +284,9 @@ class GroqClient:
             timeout=30,
         )
         if response.status_code in {401, 403}:
-            raise ProviderUnavailableError("Groq authentication failed.")
+            raise ProviderUnavailableError("Groq authentication failed.", "auth")
+        if response.status_code == 429:
+            raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
         response.raise_for_status()
         models = response.json().get("data", [])
         preferred_markers = ("qwen", "gpt-oss", "llama", "mixtral", "mistral", "gemma")
@@ -312,11 +325,11 @@ class GroqClient:
             timeout=15,
         )
         if response.status_code in {401, 403}:
-            raise ProviderUnavailableError("Groq authentication failed.")
+            raise ProviderUnavailableError("Groq authentication failed.", "auth")
         if response.status_code == 429:
-            raise ProviderUnavailableError("Groq rate limit reached.")
+            raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
         if response.status_code >= 500:
-            raise ProviderUnavailableError("Groq service unavailable.")
+            raise ProviderUnavailableError("Groq service unavailable.", "transient")
         response.raise_for_status()
         return LLMResult(
             response.json()["choices"][0]["message"]["content"],
@@ -351,11 +364,11 @@ class GroqClient:
         )
         try:
             if response.status_code in {401, 403}:
-                raise ProviderUnavailableError("Groq authentication failed.")
+                raise ProviderUnavailableError("Groq authentication failed.", "auth")
             if response.status_code == 429:
-                raise ProviderUnavailableError("Groq rate limit reached.")
+                raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
             if response.status_code >= 500:
-                raise ProviderUnavailableError("Groq service unavailable.")
+                raise ProviderUnavailableError("Groq service unavailable.", "transient")
             response.raise_for_status()
 
             def read_chunks() -> Iterator[str]:
@@ -428,6 +441,7 @@ class LLMClient:
         self.groq: Optional[GroqClient] = None
         self._disabled_until: Dict[str, float] = {}
         self._disabled_until_restart: set[str] = set()
+        self._last_error_kind: Dict[str, str] = {}
         if _load_api_keys():
             self.gemini = GeminiClient()
         groq_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -468,27 +482,43 @@ class LLMClient:
             except GeminiExhaustedError as exc:
                 last_error = exc
                 attempts.extend(exc.attempts)
+                self._last_error_kind[provider] = exc.kind
                 if exc.kind == "quota":
-                    self._disabled_until[provider] = time.monotonic() + 600
-                    break
+                    self._disabled_until[provider] = time.monotonic() + 90
                 elif exc.kind == "auth":
                     self._disabled_until_restart.add(provider)
+                elif exc.kind == "unknown":
+                    raise exc.last_error or exc
             except (ProviderUnavailableError, requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
-                status = "429" if "rate limit" in str(exc).lower() else "unavailable"
+                kind = getattr(exc, "kind", "transient")
+                self._last_error_kind[provider] = kind
                 attempts.append(
                     {
                         "provider": provider,
                         "model": model,
-                        "status": status,
+                        "status": kind,
                         "ms": round((time.perf_counter() - attempt_started) * 1000),
                     }
                 )
-                if status == "429":
-                    self._disabled_until[provider] = time.monotonic() + 600
-                elif "authentication" in str(exc).lower():
+                if kind == "quota":
+                    self._disabled_until[provider] = time.monotonic() + max(60, min(getattr(exc, "retry_after", None) or 90, 120))
+                elif kind == "auth" or "authentication" in str(exc).lower():
                     self._disabled_until_restart.add(provider)
-        raise ProviderUnavailableError("All configured LLM providers are unavailable.") from last_error
+        kinds = [self._last_error_kind.get(provider) for provider in providers if self._last_error_kind.get(provider)]
+        kind = "quota" if kinds and all(item == "quota" for item in kinds) else ("auth" if kinds and all(item == "auth" for item in kinds) else "unavailable")
+        raise ProviderUnavailableError("All configured LLM providers are unavailable.", kind) from last_error
+
+    def status(self) -> Dict[str, Dict[str, Any]]:
+        now = time.monotonic()
+        return {
+            provider: {
+                "configured": self._provider_client(provider) is not None,
+                "blocked_until": (time.time() + max(0, until - now)) if (until := self._disabled_until.get(provider, 0)) > now else None,
+                "last_error_kind": self._last_error_kind.get(provider),
+            }
+            for provider in ("gemini", "groq")
+        }
 
     def open_stream(
         self, prompt: str, groq_prompt: Optional[str] = None
