@@ -1,8 +1,9 @@
 'use client';
 
 import { useState } from 'react';
-import { AlertCircle, Check, Loader2, X } from 'lucide-react';
+import { AlertCircle, Check, Loader2 } from 'lucide-react';
 import type { CompareResponse } from '@/lib/api';
+import ModalShell from './ModalShell';
 
 interface ComparePanelProps {
   files: string[];
@@ -36,33 +37,8 @@ export default function ComparePanel({
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-3 sm:p-6"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="compare-panel-title"
-    >
-      <section className="flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-        <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-6">
-          <div>
-            <h2 id="compare-panel-title" className="text-base font-semibold text-slate-900 dark:text-slate-100">
-              Compare documents
-            </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Compare evidence retrieved separately from each selected file.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close document comparison"
-            className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:hover:bg-slate-800 dark:hover:text-slate-100"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div className="flex-1 space-y-4 overflow-y-auto p-4 sm:p-6">
+    <ModalShell title="Compare documents" label="Document comparison" onClose={onClose}>
+        <div className="space-y-4">
           {hasTwoFiles ? (
             <>
               <div>
@@ -198,7 +174,6 @@ export default function ComparePanel({
             </div>
           )}
         </div>
-      </section>
-    </div>
+    </ModalShell>
   );
 }

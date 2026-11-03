@@ -1,7 +1,10 @@
 # Demo script
 
 1. Start the backend and frontend, then upload `eval/grounding_test_doc.txt`.
-2. Click **Mind map** beside **Executive summary**. Explore the map by zooming,
+2. Click **Visualize** beside **Executive summary**. Use the shared Visual studio
+   tabs: **Mind map**, **Diagram**, **Explain**, and **Chart**. Switch between
+   tabs to confirm results stay cached, then use **Regenerate** to refresh the
+   active tab. Explore the mind map by zooming,
    panning, and collapsing branches; click a node to show its source location.
    Try **Fit to screen**, **Download SVG**, **Download PNG**, and **Regenerate**.
 3. Ask “Who founded the Zorvania Institute and when?” and open **Show evidence**.
@@ -21,7 +24,9 @@
 9. Use **Export this answer** to save one answer and **Export chat** to save the
    conversation. Try both Word and PDF; open Show evidence first to include
    retrieved passages, and generate a mind map to include its image.
-3. Open **Visualize** and try **Diagram**, **Explain visually**, and **Chart**.
+4. In **Visualize**, try **Diagram**, **Explain**, and **Chart**. Confirm all
+   tabs use the same light/dark responsive modal and that Compare and Quiz use
+   the same shell, including Escape-to-close and the mobile bottom sheet.
    Confirm that sources are shown on visual items, invented chart numbers are
    refused, and diagrams can be downloaded as SVG or PNG.
 10. If the deployed Render service has passed the SSE buffering check and

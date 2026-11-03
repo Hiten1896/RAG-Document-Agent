@@ -298,6 +298,17 @@ def get_llm_client() -> LLMClient:
     return _llm_client
 
 
+def _llm_unavailable_detail(exc: ProviderUnavailableError) -> Dict[str, str]:
+    kind = getattr(exc, "kind", "unavailable")
+    if kind == "quota":
+        message = "AI is busy (quota/rate limit). Try again in a few minutes."
+    elif kind == "auth":
+        message = "AI is not authenticated. Check the configured provider keys."
+    else:
+        message = "AI providers are temporarily unavailable. Please retry."
+    return {"message": message, "kind": kind}
+
+
 # ------------------------------------------------------------------------------
 # 4. Session tracking & cleanup
 # ------------------------------------------------------------------------------
@@ -749,13 +760,12 @@ async def generate_json(
         try:
             result = await asyncio.to_thread(client.invoke, request_prompt, groq_prompt)
         except ProviderUnavailableError as exc:
-            raise HTTPException(
-                status_code=503, detail="AI service currently unavailable."
-            ) from exc
+            raise HTTPException(status_code=503, detail=_llm_unavailable_detail(exc)) from exc
         except Exception as exc:
             logger.exception("Structured response generation failed")
             raise HTTPException(
-                status_code=503, detail="AI service currently unavailable."
+                status_code=500,
+                detail={"message": "Structured AI response failed unexpectedly. Please retry.", "kind": "internal"},
             ) from exc
 
         results.append(result)
@@ -916,6 +926,25 @@ def read_root():
         "supported_formats": sorted(SUPPORTED_EXTENSIONS),
         "embeddings_configured": jina_embeddings is not None,
     }
+
+
+@app.get("/api/llm/status")
+def llm_status() -> Dict[str, Any]:
+    try:
+        client = get_llm_client()
+        return {"providers": client.status()}
+    except HTTPException as exc:
+        configured = {
+            "gemini": bool(os.getenv("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEYS") or os.getenv("GOOGLE_API_KEY")),
+            "groq": bool(os.getenv("GROQ_API_KEY")),
+        }
+        return {
+            "providers": {
+                name: {"configured": value, "blocked_until": None, "last_error_kind": "configuration" if not value else "unknown"}
+                for name, value in configured.items()
+            },
+            "error": str(exc.detail),
+        }
 
 
 @app.post("/api/ingest")
@@ -2071,13 +2100,12 @@ async def generate_mindmap(
                     client.invoke, summary_prompt, summary_prompt
                 )
             except ProviderUnavailableError as exc:
-                raise HTTPException(
-                    status_code=503, detail="AI service currently unavailable."
-                ) from exc
+                raise HTTPException(status_code=503, detail=_llm_unavailable_detail(exc)) from exc
             except Exception as exc:
                 logger.exception("Mind map context reduction failed")
                 raise HTTPException(
-                    status_code=503, detail="AI service currently unavailable."
+                    status_code=500,
+                    detail={"message": "Mind map context reduction failed unexpectedly. Please retry.", "kind": "internal"},
                 ) from exc
             llm_calls.append(result)
             summaries.append(message_to_text(result.response))
