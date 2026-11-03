@@ -3107,7 +3107,7 @@ export default function Home() {
       {viewerFile && !visualStudioOpen && (
         <aside
           className="hidden md:flex min-w-0 flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
-          style={{ width: 'auto', minWidth: sidePanelWidth, flex: `1 1 ${sidePanelWidth}px` }}
+          style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}
         >
           {/* Drag handle — grabbing the left edge resizes the panel, same
               interaction as Claude's own side panel. A slightly wider
@@ -3187,7 +3187,7 @@ export default function Home() {
       )}
 
       {visualStudioOpen && (
-        <aside className="hidden md:flex min-w-0 shrink-0 relative" style={{ width: 'auto', minWidth: sidePanelWidth, flex: `1 1 ${sidePanelWidth}px` }}>
+        <aside className="hidden md:flex min-w-0 shrink-0 relative" style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}>
           <div
             onMouseDown={startViewerResize}
             className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
