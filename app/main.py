@@ -315,6 +315,8 @@ def _llm_unavailable_detail(exc: ProviderUnavailableError) -> Dict[str, str]:
 # { f"{session_id}:{chat_id}": last_activity_timestamp }
 ACTIVE_SESSIONS: Dict[str, float] = {}
 MINDMAP_CACHE: Dict[Tuple[str, str, Tuple[str, ...], str], Dict[str, Any]] = {}
+FEATURE_CACHE: Dict[Tuple[str, str, Tuple[str, ...], str, Tuple[Any, ...]], Dict[str, Any]] = {}
+FEATURE_CACHE_MAX_ENTRIES = 100
 
 
 def touch_session(session_id: str, chat_id: str) -> None:
@@ -325,6 +327,9 @@ def clear_mindmap_cache(session_id: str, chat_id: str) -> None:
     for key in list(MINDMAP_CACHE):
         if key[0] == session_id and key[1] == chat_id:
             MINDMAP_CACHE.pop(key, None)
+    for key in list(FEATURE_CACHE):
+        if key[0] == session_id and key[1] == chat_id:
+            FEATURE_CACHE.pop(key, None)
 
 
 def session_filter(session_id: str, chat_id: str) -> Dict[str, Any]:
@@ -736,8 +741,27 @@ def strip_json_wrappers(value: str) -> str:
     return fenced.group(1).strip() if fenced else value
 
 
+def _invoke_llm(client: Any, prompt: str, groq_prompt: Optional[str], feature: str, forced_provider: Optional[str] = None) -> LLMResult:
+    """Keep test doubles and older integrations source-compatible."""
+    try:
+        return client.invoke(prompt, groq_prompt, forced_provider, feature)
+    except TypeError as exc:
+        if "argument" not in str(exc) and "positional" not in str(exc):
+            raise
+        return client.invoke(prompt, groq_prompt)
+
+
+def _open_llm_stream(client: Any, prompt: str, groq_prompt: Optional[str], feature: str) -> Any:
+    try:
+        return client.open_stream(prompt, groq_prompt, feature)
+    except TypeError as exc:
+        if "argument" not in str(exc) and "positional" not in str(exc):
+            raise
+        return client.open_stream(prompt, groq_prompt)
+
+
 async def generate_json(
-    prompt: str, schema_model: Type[BaseModel]
+    prompt: str, schema_model: Type[BaseModel], feature: str = "unknown"
 ) -> Tuple[BaseModel, List[LLMResult]]:
     """Generate and validate JSON through the configured provider router."""
     client = get_llm_client()
@@ -758,7 +782,7 @@ async def generate_json(
 
         groq_prompt = request_prompt[: max(1, GROQ_MAX_CONTEXT_CHARS)]
         try:
-            result = await asyncio.to_thread(client.invoke, request_prompt, groq_prompt)
+            result = await asyncio.to_thread(_invoke_llm, client, request_prompt, groq_prompt, feature)
         except ProviderUnavailableError as exc:
             raise HTTPException(status_code=503, detail=_llm_unavailable_detail(exc)) from exc
         except Exception as exc:
@@ -1179,9 +1203,11 @@ async def query_document(
 
     try:
         llm_result = await asyncio.to_thread(
-            client.invoke,
+            _invoke_llm,
+            client,
             prompt,
             groq_prompt,
+            "query",
             forced_provider,
         )
         answer = message_to_text(llm_result.response)
@@ -1352,7 +1378,7 @@ async def stream_query_document(
             try:
                 client = get_llm_client()
                 stream_result = await asyncio.to_thread(
-                    client.open_stream, prompt, groq_prompt
+                    _open_llm_stream, client, prompt, groq_prompt, "query"
                 )
             except ProviderUnavailableError as exc:
                 logger.warning("All answer stream providers failed before first token: %s", exc)
@@ -1544,7 +1570,7 @@ async def suggest_followups(
         f"Previous question: {question}\n\nDocument context:\n{context}"
     )
     generation_started = time.perf_counter()
-    result, llm_results = await generate_json(prompt, FollowupsResponse)
+    result, llm_results = await generate_json(prompt, FollowupsResponse, "followup")
     generation_ms = round((time.perf_counter() - generation_started) * 1000)
     followups = result.questions
     last_result = llm_results[-1]
@@ -1626,6 +1652,11 @@ async def generate_quiz(
             status_code=400, detail="Upload a document before generating a quiz."
         )
 
+    file_set = tuple(sorted({str(item["metadata"].get("file_name", "document")) for item in all_items}))
+    context_version = hash(tuple(item["text"] for item in all_items))
+    cache_key = (x_session_id, x_chat_id, file_set, "quiz", (payload.count, payload.difficulty, context_version))
+    if cache_key in FEATURE_CACHE:
+        return dict(FEATURE_CACHE[cache_key])
     items = _evenly_sample(all_items, QUIZ_MAX_CHUNKS)
     items = _clip_context(
         items,
@@ -1655,7 +1686,7 @@ async def generate_quiz(
         f"Document context:\n{context}"
     )
     generation_started = time.perf_counter()
-    result, llm_results = await generate_json(prompt, QuizResponse)
+    result, llm_results = await generate_json(prompt, QuizResponse, "quiz")
     generation_ms = round((time.perf_counter() - generation_started) * 1000)
     questions = result.questions
     if len(questions) != payload.count:
@@ -1712,6 +1743,9 @@ async def generate_quiz(
             "total_ms": total_ms,
             "llm_attempts": len(llm_results),
         }
+    if len(FEATURE_CACHE) >= FEATURE_CACHE_MAX_ENTRIES:
+        FEATURE_CACHE.pop(next(iter(FEATURE_CACHE)))
+    FEATURE_CACHE[cache_key] = dict(result_data)
     return result_data
 
 
@@ -1765,6 +1799,9 @@ async def compare_documents(
                 detail=f"No uploaded document named '{file_name}' was found in this chat.",
             )
     lookup_ms = round((time.perf_counter() - lookup_started) * 1000)
+    cache_key = (x_session_id, x_chat_id, tuple(sorted(available_files)), "compare", (file_a, file_b, focus))
+    if cache_key in FEATURE_CACHE:
+        return dict(FEATURE_CACHE[cache_key])
 
     if jina_embeddings is None:
         raise HTTPException(
@@ -1859,7 +1896,7 @@ async def compare_documents(
         f"Document B: {file_b}\n{context_b}"
     )
     generation_started = time.perf_counter()
-    result, llm_results = await generate_json(prompt, CompareResponse)
+    result, llm_results = await generate_json(prompt, CompareResponse, "compare")
     generation_ms = round((time.perf_counter() - generation_started) * 1000)
     for comparison in result.comparisons:
         if comparison.source_a not in sources_a | {not_found_a}:
@@ -1930,6 +1967,9 @@ async def compare_documents(
             "total_ms": total_ms,
             "llm_attempts": len(llm_results),
         }
+    if len(FEATURE_CACHE) >= FEATURE_CACHE_MAX_ENTRIES:
+        FEATURE_CACHE.pop(next(iter(FEATURE_CACHE)))
+    FEATURE_CACHE[cache_key] = dict(result_data)
     return result_data
 
 
@@ -2097,7 +2137,7 @@ async def generate_mindmap(
             summary_prompt = summary_prompt[: max(1, GROQ_MAX_CONTEXT_CHARS)]
             try:
                 result = await asyncio.to_thread(
-                    client.invoke, summary_prompt, summary_prompt
+                    _invoke_llm, client, summary_prompt, summary_prompt, "mindmap"
                 )
             except ProviderUnavailableError as exc:
                 raise HTTPException(status_code=503, detail=_llm_unavailable_detail(exc)) from exc
@@ -2133,7 +2173,7 @@ async def generate_mindmap(
             f"Allowed source labels: {json.dumps(allowed_sources, ensure_ascii=False)}\n"
             f"Document context:\n{context}"
         )
-        mindmap_result, json_results = await generate_json(map_prompt, MindMapResponse)
+        mindmap_result, json_results = await generate_json(map_prompt, MindMapResponse, "mindmap")
         llm_calls.extend(json_results)
         mindmap = _sanitize_mindmap(
             MindMapResponse.model_validate(mindmap_result),
@@ -2203,6 +2243,11 @@ async def generate_visual(
     all_items.sort(key=lambda item: (str(item["metadata"].get("file_name", "")), int(item["metadata"].get("chunk_index", 0))))
     if not all_items:
         raise HTTPException(status_code=400, detail="Upload a document before generating a visual.")
+    file_set = tuple(sorted({str(item["metadata"].get("file_name", "document")) for item in all_items}))
+    context_version = hash(tuple(item["text"] for item in all_items))
+    cache_key = (x_session_id, x_chat_id, file_set, payload.kind, (topic, context_version))
+    if cache_key in FEATURE_CACHE:
+        return dict(FEATURE_CACHE[cache_key])
 
     embedding_ms = 0
     if topic:
@@ -2255,7 +2300,7 @@ async def generate_visual(
         "explainer": ExplainerResponse,
         "chart": ChartResponse,
     }
-    result, llm_results = await generate_json(prompts[payload.kind], schemas[payload.kind])
+    result, llm_results = await generate_json(prompts[payload.kind], schemas[payload.kind], payload.kind)
     if len(llm_results) > 2:
         raise HTTPException(status_code=503, detail="Visual generation exceeded its call limit.")
 
@@ -2280,6 +2325,9 @@ async def generate_visual(
     if x_debug:
         response.headers["X-Debug"] = "true"
         output["debug"] = {"kind": payload.kind, "topic": topic, "chunks_used": len(items), "source_labels": allowed_sources, "embedding_ms": embedding_ms, "total_ms": round((time.perf_counter() - started) * 1000), "llm_attempts": len(llm_results)}
+    if len(FEATURE_CACHE) >= FEATURE_CACHE_MAX_ENTRIES:
+        FEATURE_CACHE.pop(next(iter(FEATURE_CACHE)))
+    FEATURE_CACHE[cache_key] = dict(output)
     return output
 
 

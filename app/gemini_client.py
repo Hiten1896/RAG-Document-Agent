@@ -5,12 +5,49 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from collections import deque
+from threading import Lock
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import requests
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 logger = logging.getLogger("docagent.llm")
+
+
+class ProviderLimiter:
+    """Small process-local token bucket; never waits longer than ten seconds."""
+
+    def __init__(self, provider: str):
+        self.provider = provider
+        try:
+            rpm = float(os.getenv(f"{provider.upper()}_RPM", "8" if provider == "gemini" else "20"))
+        except ValueError:
+            rpm = 8 if provider == "gemini" else 20
+        self.interval = 60.0 / max(0.1, rpm)
+        self._calls: deque[float] = deque()
+        self._lock = Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._calls and now - self._calls[0] >= 60:
+                    self._calls.popleft()
+                wait = max(0.0, (self._calls[-1] + self.interval - now) if self._calls else 0.0)
+                if wait <= 10:
+                    if wait:
+                        time.sleep(wait)
+                    self._calls.append(time.monotonic())
+                    return
+            raise ProviderUnavailableError(f"{self.provider.title()} is busy; retry in {max(1, round(wait))} s.", "busy", wait)
+
+    def recent(self) -> int:
+        with self._lock:
+            now = time.monotonic()
+            while self._calls and now - self._calls[0] >= 60:
+                self._calls.popleft()
+            return len(self._calls)
 
 
 class GeminiExhaustedError(RuntimeError):
@@ -153,13 +190,13 @@ class GeminiClient:
             self._clients[cache_key] = client
         return client
 
-    def invoke(self, prompt: str) -> LLMResult:
+    def invoke(self, prompt: str, feature: str = "unknown") -> LLMResult:
         last_kind = "unknown"
         last_error: Optional[Exception] = None
         attempts: List[Dict[str, str]] = []
         start_key_index = self._current_key_index
-        for model in self.models:
-            for offset in range(len(self.api_keys)):
+        for model in self.models[:1]:
+            for offset in range(min(1, len(self.api_keys))):
                 key_index = (start_key_index + offset) % len(self.api_keys)
                 started = time.perf_counter()
                 try:
@@ -175,6 +212,7 @@ class GeminiClient:
                     self._current_key_index = key_index
                     return LLMResult(response, "gemini", model, attempts)
                 except Exception as exc:
+                    logger.info("llm_call feature=%s provider=gemini model=%s attempt=%s prompt_chars=%s status=%s", feature, model, len(attempts) + 1, len(prompt), GeminiClient._classify(str(exc)))
                     last_error = exc
                     last_kind = self._classify(str(exc))
                     attempts.append(
@@ -194,13 +232,13 @@ class GeminiClient:
             attempts=attempts,
         )
 
-    def open_stream(self, prompt: str) -> LLMStreamResult:
+    def open_stream(self, prompt: str, feature: str = "query") -> LLMStreamResult:
         last_kind = "unknown"
         last_error: Optional[Exception] = None
         attempts: List[Dict[str, Any]] = []
         start_key_index = self._current_key_index
-        for model in self.models:
-            for offset in range(len(self.api_keys)):
+        for model in self.models[:1]:
+            for offset in range(min(1, len(self.api_keys))):
                 key_index = (start_key_index + offset) % len(self.api_keys)
                 started = time.perf_counter()
                 iterator: Optional[Iterator[Any]] = None
@@ -215,6 +253,8 @@ class GeminiClient:
                             break
                     if not first_chunk:
                         raise RuntimeError("Gemini stream returned no text.")
+
+                    logger.info("llm_call feature=%s provider=gemini model=%s attempt=%s prompt_chars=%s status=200", feature, model, len(attempts) + 1, len(prompt))
 
                     self._current_key_index = key_index
                     attempts.append(
@@ -309,9 +349,18 @@ class GroqClient:
             raise ProviderUnavailableError("Groq returned no general-purpose chat model.")
         return candidates[0]
 
-    def invoke(self, prompt: str) -> LLMResult:
+    def invoke(self, prompt: str, feature: str = "unknown") -> LLMResult:
         started = time.perf_counter()
-        response = self._session.post(
+        response = self._post(prompt, feature, retry_5xx=True)
+        return LLMResult(
+            response.json()["choices"][0]["message"]["content"],
+            "groq", self.model,
+            [{"provider": "groq", "model": self.model, "status": "success", "ms": round((time.perf_counter() - started) * 1000)}],
+        )
+
+    def _post(self, prompt: str, feature: str, retry_5xx: bool = False) -> requests.Response:
+        for attempt in range(2 if retry_5xx else 1):
+            response = self._session.post(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
             json={
@@ -323,29 +372,21 @@ class GroqClient:
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=15,
-        )
-        if response.status_code in {401, 403}:
-            raise ProviderUnavailableError("Groq authentication failed.", "auth")
-        if response.status_code == 429:
-            raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
-        if response.status_code >= 500:
-            raise ProviderUnavailableError("Groq service unavailable.", "transient")
-        response.raise_for_status()
-        return LLMResult(
-            response.json()["choices"][0]["message"]["content"],
-            "groq",
-            self.model,
-            [
-                {
-                    "provider": "groq",
-                    "model": self.model,
-                    "status": "success",
-                    "ms": round((time.perf_counter() - started) * 1000),
-                }
-            ],
-        )
+            )
+            logger.info("llm_call feature=%s provider=groq model=%s attempt=%s prompt_chars=%s status=%s", feature, self.model, attempt + 1, len(prompt), response.status_code)
+            if response.status_code == 429:
+                raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
+            if response.status_code >= 500 and attempt == 0:
+                continue
+            if response.status_code in {401, 403}:
+                raise ProviderUnavailableError("Groq authentication failed.", "auth")
+            if response.status_code >= 500:
+                raise ProviderUnavailableError("Groq service unavailable.", "transient")
+            response.raise_for_status()
+            return response
+        return response
 
-    def open_stream(self, prompt: str) -> LLMStreamResult:
+    def open_stream(self, prompt: str, feature: str = "query") -> LLMStreamResult:
         started = time.perf_counter()
         response = self._session.post(
             f"{self.base_url}/chat/completions",
@@ -362,6 +403,7 @@ class GroqClient:
             timeout=(15, 60),
             stream=True,
         )
+        logger.info("llm_call feature=%s provider=groq model=%s attempt=1 prompt_chars=%s status=%s", feature, self.model, len(prompt), response.status_code)
         try:
             if response.status_code in {401, 403}:
                 raise ProviderUnavailableError("Groq authentication failed.", "auth")
@@ -442,6 +484,8 @@ class LLMClient:
         self._disabled_until: Dict[str, float] = {}
         self._disabled_until_restart: set[str] = set()
         self._last_error_kind: Dict[str, str] = {}
+        self._limiters = {"gemini": ProviderLimiter("gemini"), "groq": ProviderLimiter("groq")}
+        self._events: Dict[str, deque[Tuple[float, str]]] = {"gemini": deque(), "groq": deque()}
         if _load_api_keys():
             self.gemini = GeminiClient()
         groq_key = os.getenv("GROQ_API_KEY", "").strip()
@@ -463,6 +507,7 @@ class LLMClient:
         prompt: str,
         groq_prompt: Optional[str] = None,
         forced_provider: Optional[str] = None,
+        feature: str = "unknown",
     ) -> LLMResult:
         providers = [forced_provider] if forced_provider else self.provider_order
         attempts: List[Dict[str, Any]] = []
@@ -476,7 +521,9 @@ class LLMClient:
             model = getattr(client, "model", "configured")
             attempt_started = time.perf_counter()
             try:
-                result = client.invoke(groq_prompt if provider == "groq" and groq_prompt else prompt)
+                self._limiters[provider].acquire()
+                self._events[provider].append((time.monotonic(), feature))
+                result = client.invoke(groq_prompt if provider == "groq" and groq_prompt else prompt, feature)
                 result.attempts = attempts + result.attempts
                 return result
             except GeminiExhaustedError as exc:
@@ -502,7 +549,7 @@ class LLMClient:
                     }
                 )
                 if kind == "quota":
-                    self._disabled_until[provider] = time.monotonic() + max(60, min(getattr(exc, "retry_after", None) or 90, 120))
+                    self._disabled_until[provider] = time.monotonic() + max(1, min(getattr(exc, "retry_after", None) or 60, 3600))
                 elif kind == "auth" or "authentication" in str(exc).lower():
                     self._disabled_until_restart.add(provider)
         kinds = [self._last_error_kind.get(provider) for provider in providers if self._last_error_kind.get(provider)]
@@ -511,17 +558,27 @@ class LLMClient:
 
     def status(self) -> Dict[str, Dict[str, Any]]:
         now = time.monotonic()
+        by_feature: Dict[str, Dict[str, int]] = {}
+        for provider, events in self._events.items():
+            while events and now - events[0][0] >= 60:
+                events.popleft()
+            counts: Dict[str, int] = {}
+            for _, feature in events:
+                counts[feature] = counts.get(feature, 0) + 1
+            by_feature[provider] = counts
         return {
             provider: {
                 "configured": self._provider_client(provider) is not None,
                 "blocked_until": (time.time() + max(0, until - now)) if (until := self._disabled_until.get(provider, 0)) > now else None,
                 "last_error_kind": self._last_error_kind.get(provider),
+                "calls_last_60s": self._limiters[provider].recent(),
+                "calls_last_60s_by_feature": by_feature[provider],
             }
             for provider in ("gemini", "groq")
         }
 
     def open_stream(
-        self, prompt: str, groq_prompt: Optional[str] = None
+        self, prompt: str, groq_prompt: Optional[str] = None, feature: str = "query"
     ) -> LLMStreamResult:
         attempts: List[Dict[str, Any]] = []
         last_error: Optional[Exception] = None
@@ -540,7 +597,9 @@ class LLMClient:
                     if provider == "groq" and groq_prompt
                     else prompt
                 )
-                result = client.open_stream(provider_prompt)
+                self._limiters[provider].acquire()
+                self._events[provider].append((time.monotonic(), feature))
+                result = client.open_stream(provider_prompt, feature)
                 result.attempts = attempts + result.attempts
                 return result
             except GeminiExhaustedError as exc:

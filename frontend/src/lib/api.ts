@@ -286,7 +286,16 @@ export interface VisualChart {
 
 export type VisualResponse = VisualDiagram | VisualExplainer | VisualChart;
 
-export async function generateVisual(
+const inFlight = new Map<string, Promise<unknown>>();
+function dedupe<T>(key: string, request: () => Promise<T>): Promise<T> {
+  const existing = inFlight.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+  const promise = request().finally(() => inFlight.delete(key));
+  inFlight.set(key, promise);
+  return promise;
+}
+
+async function requestVisual(
   kind: VisualKind,
   chatId?: string,
   topic?: string,
@@ -304,6 +313,10 @@ export async function generateVisual(
   }
   if (!response.ok) throw await parseErrorResponse(response, 'Failed to generate the visual.');
   return response.json();
+}
+
+export function generateVisual(kind: VisualKind, chatId?: string, topic?: string): Promise<VisualResponse> {
+  return dedupe(`visual:${chatId ?? ''}:${kind}:${topic?.trim() ?? ''}`, () => requestVisual(kind, chatId, topic));
 }
 
 export interface QueryDebugChunk {
@@ -603,7 +616,7 @@ export async function streamQueryDocument(
   }
 }
 
-export async function generateFollowups(
+async function requestFollowups(
   question: string,
   chatId?: string,
 ): Promise<FollowupsResponse> {
@@ -630,7 +643,11 @@ export async function generateFollowups(
   return response.json();
 }
 
-export async function generateQuiz(
+export function generateFollowups(question: string, chatId?: string): Promise<FollowupsResponse> {
+  return dedupe(`followup:${chatId ?? ''}:${question}`, () => requestFollowups(question, chatId));
+}
+
+async function requestQuiz(
   count: number,
   difficulty: QuizDifficulty,
   chatId?: string,
@@ -658,7 +675,11 @@ export async function generateQuiz(
   return response.json();
 }
 
-export async function compareDocuments(
+export function generateQuiz(count: number, difficulty: QuizDifficulty, chatId?: string): Promise<QuizResponse> {
+  return dedupe(`quiz:${chatId ?? ''}:${count}:${difficulty}`, () => requestQuiz(count, difficulty, chatId));
+}
+
+async function requestCompareDocuments(
   fileA: string,
   fileB: string,
   focus: string,
@@ -691,7 +712,11 @@ export async function compareDocuments(
   return response.json();
 }
 
-export async function generateMindMap(
+export function compareDocuments(fileA: string, fileB: string, focus: string, chatId?: string): Promise<CompareResponse> {
+  return dedupe(`compare:${chatId ?? ''}:${fileA}:${fileB}:${focus.trim()}`, () => requestCompareDocuments(fileA, fileB, focus, chatId));
+}
+
+async function requestMindMap(
   chatId?: string,
   options: MindMapOptions = {},
 ): Promise<MindMapResponse> {
@@ -720,6 +745,10 @@ export async function generateMindMap(
   }
 
   return response.json();
+}
+
+export function generateMindMap(chatId?: string, options: MindMapOptions = {}): Promise<MindMapResponse> {
+  return dedupe(`mindmap:${chatId ?? ''}:${JSON.stringify(options)}`, () => requestMindMap(chatId, options));
 }
 
 /**
