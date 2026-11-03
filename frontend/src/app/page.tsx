@@ -163,6 +163,20 @@ interface SavedArtifact {
   createdAt: string;
 }
 
+function TextResultPanel({ text, onClose }: { text: string; onClose: () => void }) {
+  return (
+    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900" aria-label="Generated result">
+      <header className="mb-4 flex shrink-0 items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
+        <h2 className="text-sm font-semibold">Generated result</h2>
+        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
+      </header>
+      <div className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-700 dark:text-slate-300">
+        {text || 'Preparing your result…'}
+      </div>
+    </aside>
+  );
+}
+
 type ExportFormat = 'pdf' | 'docx';
 
 type PromptAction =
@@ -185,10 +199,6 @@ function normalizePrompt(value: string): string {
 
 function promptAction(value: string): PromptAction | null {
   const prompt = normalizePrompt(value);
-  if (!/^(make|create|generate|show|give|draw|build|prepare|do|run)\b/.test(prompt)) {
-    return null;
-  }
-
   if (/\b(mind\s*map|mindmap|mindmapp|mind\s*max)\b/.test(prompt)) return 'mindmap';
   if (/\b(chart|charts|chrat|char)\b/.test(prompt)) return 'chart';
   if (/\b(quiz|quize|quizz|questionnaire)\b/.test(prompt)) return 'quiz';
@@ -198,6 +208,16 @@ function promptAction(value: string): PromptAction | null {
   if (/\b(risks?|risk|caveats?|limitations?)\b/.test(prompt)) return 'risks';
   if (/\b(terms?|glossary|definitions?|concepts?)\b/.test(prompt)) return 'terms';
   return null;
+}
+
+function promptTopic(value: string, action: 'mindmap' | 'chart'): string {
+  return normalizePrompt(value)
+    .replace(/^(please|can you|could you|would you)\s+/, '')
+    .replace(/^(make|create|generate|show|give|draw|build|prepare|do|run)\s+/, '')
+    .replace(action === 'mindmap' ? /\bmind\s*map\b|\bmindmap\b/ : /\bcharts?\b/, '')
+    .replace(/\b(for me|please|from the documents?|of the documents?)\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 const COMMAND_PROMPTS: Record<Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>, string> = {
@@ -694,7 +714,7 @@ export default function Home() {
   const [viewerLocation, setViewerLocation] = useState<string | null>(null);
   const [viewerText, setViewerText] = useState<string | null>(null);
   const [visualStudioOpen, setVisualStudioOpen] = useState(false);
-  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare'>('visual');
+  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare' | 'answer'>('visual');
   const [visualStudioTab, setVisualStudioTab] = useState<VisualStudioTab>('mindmap');
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
@@ -875,8 +895,8 @@ export default function Home() {
      same idea as Claude's own side panel. Persists only for the session.
      Dragging below MIN_VIEWER_WIDTH closes the panel outright (like
      dragging a native panel shut) instead of getting stuck at a floor. */
-  const MIN_VIEWER_WIDTH = 320;
-  const CLOSE_DRAG_THRESHOLD = 220; // drag narrower than this to dismiss
+  const MIN_VIEWER_WIDTH = 360;
+  const MAX_VIEWER_WIDTH = 560;
   const [viewerWidth, setViewerWidth] = useState(440);
   const viewerResizingRef = useRef(false);
 
@@ -893,7 +913,10 @@ export default function Home() {
       // Panel is on the right edge of the window, so its width is the
       // distance from the cursor to the right edge of the viewport.
       const next = window.innerWidth - e.clientX;
-      const clamped = Math.min(Math.max(next, CLOSE_DRAG_THRESHOLD), Math.round(window.innerWidth * 0.7));
+      const clamped = Math.min(
+        Math.max(next, MIN_VIEWER_WIDTH),
+        Math.min(MAX_VIEWER_WIDTH, Math.round(window.innerWidth * 0.48)),
+      );
       setViewerWidth(clamped);
     };
     const onUp = (e: MouseEvent) => {
@@ -903,13 +926,16 @@ export default function Home() {
       document.body.style.userSelect = '';
 
       const next = window.innerWidth - e.clientX;
-      if (next < MIN_VIEWER_WIDTH) {
+      if (next < MIN_VIEWER_WIDTH && !visualStudioOpen) {
         // Dragged shut — close the panel and reset to the default width so
         // the next open isn't stuck at whatever tiny size it was dragged to.
         closeFileViewer();
         setViewerWidth(440);
       } else {
-        setViewerWidth(Math.min(next, Math.round(window.innerWidth * 0.7)));
+        setViewerWidth(Math.min(
+          Math.max(next, MIN_VIEWER_WIDTH),
+          Math.min(MAX_VIEWER_WIDTH, Math.round(window.innerWidth * 0.48)),
+        ));
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -918,7 +944,7 @@ export default function Home() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [closeFileViewer]);
+  }, [closeFileViewer, visualStudioOpen]);
 
   /* Theme state */
   const theme = useSyncExternalStore(
@@ -1486,12 +1512,12 @@ export default function Home() {
 
     const action = promptAction(requestedQuery);
     if (action === 'mindmap') {
-      await handleGenerateMindMap(requestedQuery);
+      await handleGenerateMindMap(promptTopic(requestedQuery, 'mindmap'));
       setQuery('');
       return;
     }
     if (action === 'chart') {
-      await handleGenerateVisual('chart', requestedQuery);
+      await handleGenerateVisual('chart', promptTopic(requestedQuery, 'chart'));
       setQuery('');
       return;
     }
@@ -1502,10 +1528,19 @@ export default function Home() {
     }
     if (action === 'compare') {
       handleOpenCompare();
+      if (pendingAttachments.length >= 2) {
+        await handleCompareDocuments(
+          pendingAttachments[0],
+          pendingAttachments[1],
+          requestedQuery,
+        );
+      }
       setQuery('');
       return;
     }
     if (action && action in COMMAND_PROMPTS) {
+      setSidePanelKind('answer');
+      setVisualStudioOpen(true);
       await handleSendQuery(undefined, COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>]);
       setQuery('');
       return;
@@ -2057,6 +2092,8 @@ export default function Home() {
   const hasIndexedDocuments = activeChatFiles.some(
     (file) => file.status === 'completed',
   );
+  const latestGeneratedAnswer =
+    [...messages].reverse().find((message) => message.sender === 'agent')?.text || '';
 
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
@@ -3069,7 +3106,12 @@ export default function Home() {
           >
             <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
           </div>
-          {sidePanelKind === 'visual' ? (
+          {sidePanelKind === 'answer' ? (
+            <TextResultPanel
+              text={latestGeneratedAnswer}
+              onClose={() => setVisualStudioOpen(false)}
+            />
+          ) : sidePanelKind === 'visual' ? (
             <VisualPanel
               embedded
               tab={visualStudioTab}
