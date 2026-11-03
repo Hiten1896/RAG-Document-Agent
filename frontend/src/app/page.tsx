@@ -857,6 +857,17 @@ export default function Home() {
     useState(activeConversationId);
   const compareRequestIdRef = useRef(0);
 
+  const closeFileViewer = useCallback(() => {
+    setViewerFile(null);
+    setViewerPage(null);
+    setViewerLocation(null);
+    setViewerText(null);
+    setViewerUrl((prevUrl) => {
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      return null;
+    });
+  }, []);
+
   const saveGeneratedArtifact = useCallback((artifact: Omit<GeneratedArtifact, 'id' | 'createdAt'>) => {
     const nextArtifact: GeneratedArtifact = {
       ...artifact,
@@ -875,7 +886,10 @@ export default function Home() {
   }, []);
 
   const openGeneratedArtifact = useCallback((artifact: GeneratedArtifact) => {
+    closeFileViewer();
     setArtifactsOpen(false);
+    setQuizOpen(false);
+    setCompareOpen(false);
     setVisualStudioOpen(true);
     if (artifact.kind === 'mindmap') {
       setMindMapData(artifact.data as MindMapResponse);
@@ -901,7 +915,7 @@ export default function Home() {
       setSidePanelKind('answer');
       setSelectedArtifactText(artifact.data as string);
     }
-  }, [activeConversationId]);
+  }, [activeConversationId, closeFileViewer]);
 
   const openFileViewer = useCallback(
     (fname: string, page?: number, location?: string, excerpt?: string) => {
@@ -912,6 +926,10 @@ export default function Home() {
           f.file,
       );
       if (!match?.file) return;
+      setVisualStudioOpen(false);
+      setQuizOpen(false);
+      setCompareOpen(false);
+      setArtifactsOpen(false);
       setViewerPage(page ?? null);
       setViewerLocation(location ?? null);
       setViewerText(excerpt ?? null);
@@ -946,17 +964,6 @@ export default function Home() {
     },
     [activeConversationId, ingestedFiles, viewerFile]
   );
-
-  const closeFileViewer = useCallback(() => {
-    setViewerFile(null);
-    setViewerPage(null);
-    setViewerLocation(null);
-    setViewerText(null);
-    setViewerUrl((prevUrl) => {
-      if (prevUrl) URL.revokeObjectURL(prevUrl);
-      return null;
-    });
-  }, []);
 
   // Release the object URL when the component unmounts so the blob isn't
   // held in memory after the panel is gone for good.
@@ -1460,6 +1467,10 @@ export default function Home() {
     const targetConversationId = activeConversationId;
     const hasCurrentMindMap = mindMapConversationId === targetConversationId;
     if (mindMapRequestRef.current) return;
+    closeFileViewer();
+    setQuizOpen(false);
+    setCompareOpen(false);
+    setArtifactsOpen(false);
     setVisualStudioOpen(true);
     setSidePanelKind('visual');
     setVisualStudioTab('mindmap');
@@ -1515,6 +1526,10 @@ export default function Home() {
     const targetConversationId = activeConversationId;
     const hasCurrentCache = visualCacheConversationId === targetConversationId;
     if (visualRequestRef.current) return;
+    closeFileViewer();
+    setQuizOpen(false);
+    setCompareOpen(false);
+    setArtifactsOpen(false);
     setVisualStudioOpen(true);
     setSidePanelKind('visual');
     setVisualStudioTab(kind);
@@ -1571,6 +1586,9 @@ export default function Home() {
       return;
     }
 
+    closeFileViewer();
+    setCompareOpen(false);
+    setArtifactsOpen(false);
     setQuizConversationId(activeConversationId);
     setQuizError(null);
     setQuizOpen(true);
@@ -1625,6 +1643,9 @@ export default function Home() {
   };
 
   const handleOpenCompare = () => {
+    closeFileViewer();
+    setQuizOpen(false);
+    setArtifactsOpen(false);
     setCompareConversationId(activeConversationId);
     setCompareError(null);
     setCompareOpen(true);
@@ -1722,6 +1743,10 @@ export default function Home() {
       return;
     }
     if (action && action in COMMAND_PROMPTS) {
+      closeFileViewer();
+      setQuizOpen(false);
+      setCompareOpen(false);
+      setArtifactsOpen(false);
       setSidePanelKind('answer');
       setVisualStudioOpen(true);
       await handleSendQuery(undefined, COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>]);
@@ -2377,6 +2402,9 @@ export default function Home() {
             <button
               type="button"
               onClick={() => {
+                closeFileViewer();
+                setQuizOpen(false);
+                setCompareOpen(false);
                 setArtifactsOpen(true);
                 setVisualStudioOpen(true);
                 setSidePanelKind('artifacts');
