@@ -1525,15 +1525,6 @@ export default function Home() {
     }
   };
 
-  const handleVisualStudioTab = (tab: VisualStudioTab) => {
-    setVisualStudioTab(tab);
-    if (tab === 'mindmap') {
-      void handleGenerateMindMap(mindMapTopic);
-    } else {
-      void handleGenerateVisual(tab);
-    }
-  };
-
   const handleOpenQuiz = () => {
     if (
       !ingestedFiles.some(
@@ -3151,7 +3142,6 @@ export default function Home() {
               mindMapError={mindMapError}
               canGenerateMindMap={hasIndexedDocuments}
               onClose={() => setVisualStudioOpen(false)}
-              onTabChange={handleVisualStudioTab}
               onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
               onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
               onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}

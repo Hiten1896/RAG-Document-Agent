@@ -18,7 +18,6 @@ interface Props {
   mindMapError: string | null;
   canGenerateMindMap: boolean;
   onClose: () => void;
-  onTabChange: (tab: VisualStudioTab) => void;
   onRetry: () => void;
   onRegenerate: () => void;
   onMindMapRetry: () => void;
@@ -46,15 +45,12 @@ function ChartView({ data }: { data: VisualChart }) {
   return <div className="min-w-0 w-full"><h3 className="mb-1 text-lg font-semibold">{data.title}</h3><div className="h-72 min-w-0 w-full"><ResponsiveContainer width="100%" height="100%" minWidth={0}>{chart}</ResponsiveContainer></div><Source value={data.source} /><div className="mt-3 flex gap-2"><button type="button" onClick={() => downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'visual-chart.json')} className="visual-download"><Download className="h-3.5 w-3.5" />Download data</button></div></div>;
 }
 
-export default function VisualPanel({ tab, visualData, visualLoading, visualError, mindMapData, mindMapLoading, mindMapError, canGenerateMindMap, onClose, onTabChange, onRetry, onRegenerate, onMindMapRetry, onMindMapRegenerate, embedded = false }: Props & { embedded?: boolean }) {
+export default function VisualPanel({ tab, visualData, visualLoading, visualError, mindMapData, mindMapLoading, mindMapError, canGenerateMindMap, onClose, onRetry, onRegenerate, onMindMapRetry, onMindMapRegenerate, embedded = false }: Props & { embedded?: boolean }) {
   const kind = tab === 'mindmap' ? null : tab;
   const data = kind ? visualData[kind] ?? null : null;
   const loading = tab === 'mindmap' ? mindMapLoading : visualLoading;
   const error = tab === 'mindmap' ? mindMapError : visualError;
   const content = <>
-      <nav className="mb-4 flex gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-slate-800" aria-label="Visual studio tabs">
-        {(['mindmap', 'chart'] as const).map((nextTab) => <button key={nextTab} type="button" onClick={() => onTabChange(nextTab)} className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold ${nextTab === tab ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-200' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'}`}>{nextTab === 'mindmap' ? 'Mind map' : 'Chart'}</button>)}
-      </nav>
       {tab === 'mindmap' && <MindMapPanel data={mindMapData} loading={mindMapLoading} error={mindMapError} canGenerate={canGenerateMindMap} onClose={onClose} onRetry={onMindMapRetry} onRegenerate={onMindMapRegenerate} embedded />}
       {tab !== 'mindmap' && <div className="mb-4 flex justify-end"><button type="button" onClick={onRegenerate} disabled={loading} className="visual-download" title="Regenerate" aria-label="Regenerate"><RefreshCw className="h-3.5 w-3.5" /></button></div>}
       {tab !== 'mindmap' && loading && <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin" />Preparing a grounded visual…</div>}
