@@ -9,7 +9,6 @@ import {
   queryDocument,
   streamQueryDocument,
   STREAMING_ENABLED,
-  generateFollowups,
   generateMindMap,
   generateVisual,
   generateQuiz,
@@ -61,8 +60,6 @@ import {
   Check,
   Download,
   Archive,
-  BookmarkCheck,
-  GitBranch,
 } from 'lucide-react';
 import type { VisualStudioTab } from './VisualPanel';
 
@@ -416,7 +413,6 @@ const SUPPORTED_UPLOAD_EXTENSIONS = new Set([
 ]);
 
 const SUPPORTED_UPLOAD_LABEL = 'PDF, DOCX, PPTX, XLSX, CSV, TXT, MD';
-const REFUSAL_ANSWER = 'I could not find this in the uploaded documents.';
 
 const SUPPORTED_UPLOAD_ACCEPT = [
   'application/pdf',
@@ -1523,7 +1519,6 @@ export default function Home() {
     }
     setVisualError(null);
     setVisualLoading(true);
-    visualRequestRef.current = true;
     if (!hasCurrentCache) {
       setVisualCache({});
       setVisualCacheConversationId(targetConversationId);
@@ -1533,6 +1528,7 @@ export default function Home() {
       setVisualLoading(false);
       return;
     }
+    visualRequestRef.current = true;
     try {
       const result = await generateVisual(kind, targetConversationId, topic);
       if (activeConversationId === targetConversationId) {
@@ -1890,42 +1886,6 @@ export default function Home() {
     streamControllerRef.current?.abort();
   };
 
-  const handleSuggestQuestions = async (index: number, answerText: string) => {
-    const previousQuestion = messages
-      .slice(0, index)
-      .reverse()
-      .find((message) => message.sender === 'user')?.text;
-    if (!previousQuestion) return;
-    if (messages[index]?.followupsLoading || messages[index]?.followups) return;
-
-    const updateMessage = (changes: Partial<Message>) => {
-      setMessagesForActive((previous) => {
-        const target = previous[index];
-        if (!target || target.sender !== 'agent' || target.text !== answerText) {
-          return previous;
-        }
-        const next = [...previous];
-        next[index] = { ...target, ...changes };
-        return next;
-      });
-    };
-
-    updateMessage({ followupsLoading: true, followupsError: undefined });
-    try {
-      const result = await generateFollowups(previousQuestion, activeConversationId);
-      updateMessage({
-        followups: result.questions,
-        followupsLoading: false,
-        followupsError: undefined,
-      });
-    } catch (err: unknown) {
-      updateMessage({
-        followupsLoading: false,
-        followupsError: getErrorMessage(err, 'Could not suggest questions.'),
-      });
-    }
-  };
-
   /* Edit & Regenerate */
   const handleStartEdit = (index: number, currentText: string) => {
     setEditingIndex(index);
@@ -2075,30 +2035,6 @@ export default function Home() {
       window.document.title = previousTitle;
     };
   }, [printExport]);
-
-  const handleSaveArtifact = (index: number, message: Message) => {
-    if (message.sender !== 'agent') return;
-    const title = `Document brief ${new Date().toLocaleDateString()}`;
-    const sourceLines = (message.sources ?? []).map((source) => {
-      const location = source.page ? `page ${source.page}` : source.location || 'document';
-      return `- ${source.source || 'Document'} (${location})`;
-    });
-    const markdown = `# ${title}\n\n${message.text}${sourceLines.length ? `\n\n## Sources\n\n${sourceLines.join('\n')}` : ''}\n`;
-    const artifact: SavedArtifact = {
-      id: `${activeConversationId}_${index}_${savedArtifacts.length}`,
-      title,
-      text: markdown,
-      createdAt: new Date().toISOString(),
-    };
-    const next = [artifact, ...savedArtifacts].slice(0, 12);
-    setSavedArtifacts(next);
-    try {
-      window.localStorage.setItem('docagent_artifacts', JSON.stringify(next));
-    } catch {
-      // Quota or private-browsing failures should not block the download.
-    }
-    downloadArtifact(artifact);
-  };
 
   const downloadArtifact = (artifact: SavedArtifact) => {
     const blob = new Blob([artifact.text], { type: 'text/markdown;charset=utf-8' });
@@ -2400,11 +2336,6 @@ export default function Home() {
               title="Open artifacts"
             >
               <Archive className="w-4 h-4" />
-              {generatedArtifacts.length > 0 && (
-                <span className="absolute -right-0.5 -top-0.5 min-w-3.5 rounded-full bg-indigo-600 px-1 text-[9px] leading-3.5 text-white">
-                  {generatedArtifacts.length > 9 ? '9+' : generatedArtifacts.length}
-                </span>
-              )}
             </button>
 
             <button
@@ -3042,47 +2973,6 @@ export default function Home() {
                     </div>
                   )}
 
-                  {!isUser && index > 0 && msg.text.trim() !== REFUSAL_ANSWER && (
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {msg.followups ? (
-                        msg.followups.map((suggestion, suggestionIndex) => (
-                          <button
-                            key={`${index}-${suggestionIndex}`}
-                            type="button"
-                            onClick={() => void handleSendQuery(undefined, suggestion)}
-                            disabled={loading}
-                            className="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-left text-xs text-indigo-700 transition hover:bg-indigo-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-500/30 dark:bg-indigo-950/40 dark:text-indigo-300 dark:hover:bg-indigo-950/70"
-                          >
-                            {suggestion}
-                          </button>
-                        ))
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => void handleSuggestQuestions(index, msg.text)}
-                          disabled={msg.followupsLoading || loading}
-                          className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300"
-                        >
-                          {msg.followupsLoading ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <MessageSquarePlus className="h-3.5 w-3.5" />
-                          )}
-                          {msg.followupsLoading
-                            ? 'Suggesting…'
-                            : msg.followupsError
-                              ? 'Retry suggestions'
-                              : 'Suggest questions'}
-                        </button>
-                      )}
-                      {msg.followupsError && (
-                        <p role="status" className="basis-full text-xs text-rose-600 dark:text-rose-400">
-                          {msg.followupsError}
-                        </p>
-                      )}
-                    </div>
-                  )}
-
                   {/* Action row — icon-only buttons that fade in on hover
                       on devices that actually have a mouse (`can-hover:`),
                       and stay permanently visible on touch devices, since
@@ -3119,43 +3009,12 @@ export default function Home() {
                         </button>
                       )}
 
-                      {!isUser && index > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const topic = messages
-                              .slice(0, index)
-                              .reverse()
-                              .find((message) => message.sender === 'user')?.text;
-                            void handleGenerateMindMap(topic);
-                          }}
-                          disabled={mindMapLoading}
-                          className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer disabled:opacity-40"
-                          title="Create a grounded mind map"
-                          aria-label="Create a grounded mind map"
-                        >
-                          <GitBranch className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-
                       {!isUser && (
                         <ExportMenu
                           label="Export this answer"
                           disabled={loading}
                           onExport={(format) => void handleExport(format, index)}
                         />
-                      )}
-
-                      {!isUser && (
-                        <button
-                          type="button"
-                          onClick={() => handleSaveArtifact(index, msg)}
-                          className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
-                          title="Save as Markdown brief"
-                          aria-label="Save as Markdown brief"
-                        >
-                          <BookmarkCheck className="w-3.5 h-3.5" />
-                        </button>
                       )}
 
                       <button
