@@ -602,7 +602,7 @@ class GroqClient:
         )
 
     def _post(self, prompt: str, feature: str, retry_5xx: bool = False) -> requests.Response:
-        structured = feature in {"mindmap", "diagram", "explainer", "chart", "quiz", "compare", "followup"}
+        structured = feature in {"mindmap", "chart", "quiz", "compare", "followup"}
         for attempt in range(2 if retry_5xx else 1):
             payload = {
                 "model": self.model,
@@ -768,7 +768,7 @@ class LLMClient:
     ) -> LLMResult:
         routes = getattr(self, "routes", {"text": getattr(self, "provider_order", ["groq", "gemini"])})
         providers = [forced_provider] if forced_provider else routes.get(
-            "visual" if feature in {"mindmap", "diagram", "explainer", "chart", "quiz", "compare"} else "text",
+            "visual" if feature in {"mindmap", "chart", "quiz", "compare"} else "text",
             getattr(self, "provider_order", ["groq", "gemini"]),
         )
         attempts: List[Dict[str, Any]] = []
@@ -866,7 +866,7 @@ class LLMClient:
             self._last_error_kind = {}
         routes = getattr(self, "routes", {"text": getattr(self, "provider_order", ["groq", "gemini"])})
         providers = routes.get(
-            "visual" if feature in {"mindmap", "diagram", "explainer", "chart", "quiz", "compare"} else "text",
+            "visual" if feature in {"mindmap", "chart", "quiz", "compare"} else "text",
             getattr(self, "provider_order", ["groq", "gemini"]),
         )
         for provider in providers:

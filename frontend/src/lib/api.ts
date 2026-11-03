@@ -264,25 +264,7 @@ export interface MindMapOptions {
   regenerate?: boolean;
 }
 
-export type VisualKind = 'diagram' | 'explainer' | 'chart';
-
-export interface VisualDiagram {
-  kind?: 'diagram';
-  type: 'flowchart' | 'timeline' | 'hierarchy' | 'cause_effect';
-  nodes: Array<{ id: string; label: string; source: string }>;
-  edges: Array<{ from: string; to: string; label: string }>;
-  mermaid: string;
-}
-
-export interface VisualExplainer {
-  kind?: 'explainer';
-  title: string;
-  summary: { text: string; source: string };
-  key_points: Array<{ text: string; source: string }>;
-  steps: Array<{ text: string; source: string }>;
-  key_numbers: Array<{ label: string; value: string; source: string }>;
-  glossary: Array<{ term: string; definition: string; source: string }>;
-}
+export type VisualKind = 'chart';
 
 export interface VisualChart {
   kind?: 'chart';
@@ -293,7 +275,7 @@ export interface VisualChart {
   source: string;
 }
 
-export type VisualResponse = VisualDiagram | VisualExplainer | VisualChart;
+export type VisualResponse = VisualChart;
 
 const inFlight = new Map<string, Promise<unknown>>();
 function dedupe<T>(key: string, request: () => Promise<T>): Promise<T> {

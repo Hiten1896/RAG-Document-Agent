@@ -67,8 +67,6 @@ import {
   BookmarkCheck,
   GitBranch,
   Network,
-  Workflow,
-  Lightbulb,
   BarChart3,
   CircleHelp,
 } from 'lucide-react';
@@ -297,33 +295,10 @@ const ANALYSIS_PRESETS = [
   },
   {
     label: 'Visualize',
-    hint: 'Mind map, diagrams, and charts',
+    hint: 'Mind maps and charts',
     prompt: '',
     icon: Network,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-    isVisual: 'diagram' as VisualKind,
-  },
-  {
-    label: 'Diagram',
-    hint: 'Flowcharts and relationships',
-    prompt: '',
-    icon: Workflow,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-    isVisual: 'diagram' as VisualKind,
-  },
-  {
-    label: 'Explain visually',
-    hint: 'Cards, steps, and key numbers',
-    prompt: '',
-    icon: Lightbulb,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-    isVisual: 'explainer' as VisualKind,
+    isMindMap: true,
   },
   {
     label: 'Chart',
@@ -407,7 +382,7 @@ const GREETINGS: Record<
     { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
   ],
   afternoon: [
-    { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
+    { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or charts.' },
     { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
     { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
     { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
@@ -418,7 +393,7 @@ const GREETINGS: Record<
     { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
     { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
     { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
-    { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
+    { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and charts included.' },
   ],
   night: [
     { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
@@ -673,7 +648,7 @@ function ChatComposer({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ask about text, tables, or diagrams..."
+            placeholder="Ask about text, tables, or charts..."
             className={`w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-12 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-base sm:text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 ${
               floating ? 'shadow-md' : 'shadow-inner'
             }`}
@@ -1609,11 +1584,9 @@ export default function Home() {
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
 
-    const visualMatch = requestedQuery.trim().match(/^(?:draw|show|make|create)\s+(?:a\s+)?(flowchart|diagram|timeline|chart|visual explanation)\b\s*(.*)$/i);
+    const visualMatch = requestedQuery.trim().match(/^(?:draw|show|make|create)\s+(?:a\s+)?chart\b\s*(.*)$/i);
     if (visualMatch) {
-      const visualType = visualMatch[1].toLowerCase();
-      const kind: VisualKind = visualType === 'chart' ? 'chart' : visualType === 'visual explanation' ? 'explainer' : 'diagram';
-      await handleGenerateVisual(kind, visualMatch[2]);
+      await handleGenerateVisual('chart', visualMatch[1]);
       setQuery('');
       return;
     }
@@ -3115,7 +3088,7 @@ export default function Home() {
       </main>
 
       {/* ═══════════ FILE VIEWER PANEL ═══════════ */}
-      {viewerFile && (
+      {viewerFile && !visualStudioOpen && (
         <aside
           className="hidden md:flex flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
           style={{ width: viewerWidth }}
@@ -3159,6 +3132,40 @@ export default function Home() {
                 relevant passage below when available.
               </span>
             </div>
+          )}
+
+          {visualStudioOpen && (
+            <aside
+              className="hidden md:flex shrink-0 relative"
+              style={{ width: viewerWidth }}
+            >
+              <div
+                onMouseDown={startViewerResize}
+                className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize visual studio"
+              >
+                <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+              </div>
+              <VisualPanel
+                embedded
+                tab={visualStudioTab}
+                visualData={visualCache}
+                visualLoading={visualLoading}
+                visualError={visualError}
+                mindMapData={mindMapData}
+                mindMapLoading={mindMapLoading}
+                mindMapError={mindMapError}
+                canGenerateMindMap={hasIndexedDocuments}
+                onClose={() => setVisualStudioOpen(false)}
+                onTabChange={handleVisualStudioTab}
+                onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+                onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+                onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
+                onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
+              />
+            </aside>
           )}
 
           <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
@@ -3207,25 +3214,6 @@ export default function Home() {
           viewerLocation={viewerLocation}
           viewerText={viewerText}
           onClose={closeFileViewer}
-        />
-      )}
-
-      {visualStudioOpen && (
-        <VisualPanel
-          tab={visualStudioTab}
-          visualData={visualCache}
-          visualLoading={visualLoading}
-          visualError={visualError}
-          mindMapData={mindMapData}
-          mindMapLoading={mindMapLoading}
-          mindMapError={mindMapError}
-          canGenerateMindMap={hasIndexedDocuments}
-          onClose={() => setVisualStudioOpen(false)}
-          onTabChange={handleVisualStudioTab}
-          onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-          onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-          onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
-          onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
         />
       )}
 

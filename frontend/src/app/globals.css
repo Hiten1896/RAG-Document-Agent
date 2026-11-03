@@ -44,10 +44,6 @@ body {
   @apply inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 transition hover:border-indigo-400 hover:text-indigo-700 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-indigo-500 dark:hover:text-indigo-300;
 }
 
-.visual-mermaid svg {
-  max-width: 100%;
-  height: auto;
-}
 
 /* ───── Slim scrollbar ─────
    The sidebar and the viewer body scroll, and the platform default scrollbar

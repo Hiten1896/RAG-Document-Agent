@@ -33,20 +33,6 @@ class VisualEndpointTests(unittest.TestCase):
                 json=payload,
             )
 
-    def test_diagram_is_bounded_grounded_and_mermaid_is_backend_generated(self):
-        vector = FakeVectorStore()
-        metadata, text = stored("visual", "chat", "The institute was founded in 1987. Paris is not here.")
-        vector.add_texts([text], [metadata])
-        llm = FakeLLM(json.dumps({
-            "type": "flowchart",
-            "nodes": [{"id": "a", "label": "Founded in 1987", "source": "page 1"}],
-            "edges": [],
-        }))
-        result = self.request({"kind": "diagram"}, llm, vector).json()
-        self.assertEqual(result["mermaid"], 'flowchart LR\n    a["Founded in 1987"]')
-        self.assertNotIn("Paris", result["mermaid"])
-        self.assertLessEqual(len(llm.prompts), 2)
-
     def test_chart_rejects_invented_numbers(self):
         vector = FakeVectorStore()
         metadata, text = stored("visual", "chat", "The institute opened in 1987.")
@@ -57,28 +43,6 @@ class VisualEndpointTests(unittest.TestCase):
         response = self.request({"kind": "chart"}, llm, vector)
         self.assertEqual(response.status_code, 422)
         self.assertIn("not found", response.json()["detail"])
-
-    def test_explainer_cards_keep_sources_on_points_steps_numbers_and_glossary(self):
-        vector = FakeVectorStore()
-        metadata, text = stored("visual", "chat", "The institute was founded in 1987 and teaches robotics.")
-        vector.add_texts([text], [metadata])
-        llm = FakeLLM(json.dumps({
-            "title": "Institute overview",
-            "summary": {"text": "A document-grounded overview.", "source": "page 1"},
-            "key_points": [
-                {"text": "Founded in 1987", "source": "page 1"},
-                {"text": "Teaches robotics", "source": "page 1"},
-                {"text": "No outside facts", "source": "page 1"},
-            ],
-            "steps": [{"text": "Read the stated history", "source": "page 1"}],
-            "key_numbers": [{"label": "Founded", "value": "1987", "source": "page 1"}],
-            "glossary": [{"term": "Robotics", "definition": "A stated subject", "source": "page 1"}],
-        }))
-        result = self.request({"kind": "explainer"}, llm, vector).json()
-        self.assertEqual(len(result["key_points"]), 3)
-        self.assertEqual(result["key_numbers"][0]["source"], "page 1")
-        self.assertEqual(result["glossary"][0]["source"], "page 1")
-        self.assertNotIn("Paris", json.dumps(result))
 
     def test_chart_accepts_numbers_that_are_present_in_context(self):
         vector = FakeVectorStore()
@@ -97,7 +61,7 @@ class VisualEndpointTests(unittest.TestCase):
         metadata, text = stored("visual", "chat", "The institute was founded in 1987.")
         vector.add_texts([text], [metadata])
         llm = FakeLLM("not json")
-        response = self.request({"kind": "diagram"}, llm, vector)
+        response = self.request({"kind": "chart"}, llm, vector)
         self.assertEqual(response.status_code, 502)
         self.assertEqual(len(llm.prompts), 2)
 
@@ -109,7 +73,7 @@ class VisualEndpointTests(unittest.TestCase):
         llm = FakeLLM(json.dumps({
             "type": "flowchart", "nodes": [{"id": "a", "label": "First chat only", "source": "page 1"}], "edges": []
         }))
-        self.request({"kind": "diagram"}, llm, vector, chat="one")
+        self.request({"kind": "chart"}, llm, vector, chat="one")
         self.assertIn("First chat only", llm.prompts[0])
         self.assertNotIn("Second chat only", llm.prompts[0])
 

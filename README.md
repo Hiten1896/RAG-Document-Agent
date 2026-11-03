@@ -99,7 +99,7 @@ prompt.
 - `POST /api/quiz` generates 1–10 multiple-choice questions from the active chat's documents.
 - `POST /api/compare` compares two files with separate per-file retrieval and citations.
 - `POST /api/mindmap` generates a structured mind map from the active chat's documents.
-- `POST /api/visual` generates a grounded diagram, visual explanation, or chart (`kind` is `diagram`, `explainer`, or `chart`; optional `topic` enables similarity retrieval).
+- `POST /api/visual` generates a grounded chart (`kind` is `chart`; optional `topic` enables similarity retrieval).
 - `GET /api/llm/status` reports provider configuration, temporary block expiry, and the last safe error kind without secrets.
 - `DELETE /api/session/clear` removes one session/chat's vectors.
 
@@ -123,7 +123,7 @@ slides, sheets, or unpaginated text; the frontend uses these fields for citation
 navigation.
 
 Visual answers are available from the single **Visualize** entry: one shared
-Visual studio with Mind map, Diagram, Explain, and Chart tabs. Each tab caches
+Visual studio with Mind map and Chart tabs. Each tab caches
 its result for the active chat; use Regenerate to request a fresh result. The
 studio adapts its Fit/export toolbar to the active visual and uses the same
 responsive modal shell as Compare documents and Quiz me. All visuals use the active chat's session

@@ -269,7 +269,7 @@ export default function MindMapPanel({
 
   return (
     <div
-      className={embedded ? 'flex h-full min-h-[520px] w-full flex-col' : 'fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5'}
+      className={embedded ? 'flex h-full min-h-[760px] w-full flex-col' : 'fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5'}
       role="dialog"
       aria-modal="true"
       aria-label="Document mind map"

@@ -58,8 +58,8 @@ class RoutingTests(unittest.TestCase):
 
         self.assertEqual(client.invoke("q", feature="query").provider, "fake")
         self.assertEqual(groq.calls, ["query"])
-        self.assertEqual(client.invoke("v", feature="diagram").provider, "fake")
-        self.assertEqual(gemini.calls, ["diagram"])
+        self.assertEqual(client.invoke("v", feature="chart").provider, "fake")
+        self.assertEqual(gemini.calls, ["chart"])
 
     def test_limiter_skips_wait_over_eight_seconds(self):
         limiter = ProviderLimiter("test", rpm=4, max_wait=8)
@@ -116,10 +116,10 @@ class RoutingTests(unittest.TestCase):
             error=GeminiExhaustedError("quota", "quota", retry_after=60)
         )
         groq = FakeProvider()
-        result = router(gemini, groq).invoke("visual", feature="diagram")
+        result = router(gemini, groq).invoke("visual", feature="chart")
         self.assertEqual(result.provider, "fake")
-        self.assertEqual(gemini.calls, ["diagram"])
-        self.assertEqual(groq.calls, ["diagram"])
+        self.assertEqual(gemini.calls, ["chart"])
+        self.assertEqual(groq.calls, ["chart"])
 
 
 if __name__ == "__main__":
