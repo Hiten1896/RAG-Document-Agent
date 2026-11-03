@@ -2260,10 +2260,14 @@ export default function Home() {
   const activeGeneratedArtifacts = generatedArtifacts.filter(
     (artifact) => artifact.conversationId === activeConversationId,
   );
+  const boundedViewerWidth = Math.min(
+    Math.max(viewerWidth, MIN_VIEWER_WIDTH),
+    MAX_VIEWER_WIDTH,
+  );
   const sidePanelWidth = desktopSidebarOpen
-    ? viewerWidth
+    ? boundedViewerWidth
     : Math.min(
-        viewerWidth + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
+        boundedViewerWidth + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
         MAX_VIEWER_WIDTH + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
       );
   return (
@@ -3115,7 +3119,7 @@ export default function Home() {
               actually easy to grab. */}
           <div
             onMouseDown={startViewerResize}
-            className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
+            className="absolute -left-2 top-0 bottom-0 z-30 flex w-4 cursor-col-resize justify-center touch-none select-none group"
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize file viewer"
@@ -3190,7 +3194,7 @@ export default function Home() {
         <aside className="hidden md:flex min-w-0 shrink-0 relative" style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}>
           <div
             onMouseDown={startViewerResize}
-            className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
+            className="absolute -left-2 top-0 bottom-0 z-30 flex w-4 cursor-col-resize justify-center touch-none select-none group"
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize visual studio"
