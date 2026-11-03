@@ -12,6 +12,7 @@ interface ComparePanelProps {
   error: string | null;
   onClose: () => void;
   onCompare: (fileA: string, fileB: string, focus: string) => void;
+  embedded?: boolean;
 }
 
 export default function ComparePanel({
@@ -20,7 +21,7 @@ export default function ComparePanel({
   loading,
   error,
   onClose,
-  onCompare,
+  onCompare, embedded = false,
 }: ComparePanelProps) {
   const [selectedFiles, setSelectedFiles] = useState(() => files.slice(0, 2));
   const [focus, setFocus] = useState('');
@@ -37,7 +38,7 @@ export default function ComparePanel({
   };
 
   return (
-    <ModalShell title="Compare documents" label="Document comparison" onClose={onClose}>
+    <ModalShell title="Compare documents" label="Document comparison" onClose={onClose} embedded={embedded}>
         <div className="space-y-4">
           {hasTwoFiles ? (
             <>

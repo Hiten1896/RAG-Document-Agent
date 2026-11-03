@@ -19,6 +19,7 @@ interface QuizPanelProps {
   error: string | null;
   onClose: () => void;
   onGenerate: (count: number, difficulty: QuizDifficulty) => void;
+  embedded?: boolean;
 }
 
 function answersMatch(left: string | undefined, right: string): boolean {
@@ -30,7 +31,7 @@ export default function QuizPanel({
   loading,
   error,
   onClose,
-  onGenerate,
+  onGenerate, embedded = false,
 }: QuizPanelProps) {
   const [count, setCount] = useState(5);
   const [difficulty, setDifficulty] = useState<QuizDifficulty>('medium');
@@ -69,7 +70,7 @@ export default function QuizPanel({
   };
 
   return (
-    <ModalShell title="Quiz me" label="Document practice" onClose={onClose}>
+    <ModalShell title="Quiz me" label="Document practice" onClose={onClose} embedded={embedded}>
         <div className="space-y-4">
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-xs font-medium text-slate-600 dark:text-slate-300">

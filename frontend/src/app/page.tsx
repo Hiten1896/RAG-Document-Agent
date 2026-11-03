@@ -310,6 +310,35 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function editDistance(left: string, right: string): number {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    let diagonal = row[0];
+    row[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const previous = row[j];
+      row[j] = left[i - 1] === right[j - 1]
+        ? diagonal
+        : Math.min(diagonal + 1, row[j] + 1, row[j - 1] + 1);
+      diagonal = previous;
+    }
+  }
+  return row[right.length];
+}
+
+function analysisIntent(value: string): { kind: 'mindmap' | 'quiz' | 'chart' | 'summary' | 'compare' | 'actions'; rest: string } | null {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const match = (terms: string[]) => words.some((word) => terms.some((term) => word === term || editDistance(word, term) <= (term.length > 5 ? 2 : 1)));
+  if (match(['mindmap']) || (match(['mind']) && match(['map']))) return { kind: 'mindmap', rest: value };
+  if (match(['quiz', 'quizz'])) return { kind: 'quiz', rest: value };
+  if (match(['chart', 'charts', 'graph', 'plot'])) return { kind: 'chart', rest: value };
+  if (match(['summary', 'summarize', 'summarise', 'overview'])) return { kind: 'summary', rest: value };
+  if (match(['compare', 'comparison', 'difference', 'differences'])) return { kind: 'compare', rest: value };
+  if (match(['action', 'actions', 'task', 'tasks', 'todo'])) return { kind: 'actions', rest: value };
+  return null;
+}
+
 function linkInlineCitations(answer: string, sources: SourceMetadata[]): string {
   const fileNames = [...new Set(sources.map((source) => source.source).filter(Boolean))]
     .sort((left, right) => (right?.length ?? 0) - (left?.length ?? 0))
@@ -1319,6 +1348,22 @@ export default function Home() {
     }
   };
 
+  const handleOpenQuiz = () => {
+    if (
+      !ingestedFiles.some(
+        (file) =>
+          file.chatId === activeConversationId && file.status === 'completed',
+      )
+    ) {
+      return;
+    }
+
+    setQuizConversationId(activeConversationId);
+    setQuizError(null);
+    setQuizOpen(true);
+    setVisualStudioOpen(true);
+  };
+
   const handleGenerateQuiz = async (
     count: number,
     difficulty: QuizDifficulty,
@@ -1356,7 +1401,15 @@ export default function Home() {
   const handleCloseQuiz = () => {
     quizRequestIdRef.current += 1;
     setQuizOpen(false);
+    setVisualStudioOpen(false);
     setQuizLoading(false);
+  };
+
+  const handleOpenCompare = () => {
+    setCompareConversationId(activeConversationId);
+    setCompareError(null);
+    setCompareOpen(true);
+    setVisualStudioOpen(true);
   };
 
   const handleCompareDocuments = async (
@@ -1403,6 +1456,7 @@ export default function Home() {
   const handleCloseCompare = () => {
     compareRequestIdRef.current += 1;
     setCompareOpen(false);
+    setVisualStudioOpen(false);
     setCompareLoading(false);
   };
 
@@ -1412,12 +1466,23 @@ export default function Home() {
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
 
-    const mindMapMatch = requestedQuery.trim().match(
-      /^(?:make|create|show|generate|build)\s+(?:a\s+)?mind\s*map\b\s*(.*)$/i,
-    );
-    if (mindMapMatch) {
-      await handleGenerateMindMap(mindMapMatch[1]);
+    const intent = presetQuery ? null : analysisIntent(requestedQuery);
+    if (intent) {
       setQuery('');
+      if (intent.kind === 'mindmap') {
+        await handleGenerateMindMap(requestedQuery);
+      } else if (intent.kind === 'quiz') {
+        handleOpenQuiz();
+      } else if (intent.kind === 'chart') {
+        await handleGenerateVisual('chart', requestedQuery);
+      } else if (intent.kind === 'compare') {
+        handleOpenCompare();
+      } else {
+        const prompt = intent.kind === 'summary'
+          ? 'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.'
+          : 'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.';
+        await handleSendQuery(undefined, prompt);
+      }
       return;
     }
 
@@ -2939,40 +3004,6 @@ export default function Home() {
             </div>
           )}
 
-          {visualStudioOpen && (
-            <aside
-              className="hidden md:flex shrink-0 relative"
-              style={{ width: viewerWidth }}
-            >
-              <div
-                onMouseDown={startViewerResize}
-                className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
-                role="separator"
-                aria-orientation="vertical"
-                aria-label="Resize visual studio"
-              >
-                <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
-              </div>
-              <VisualPanel
-                embedded
-                tab={visualStudioTab}
-                visualData={visualCache}
-                visualLoading={visualLoading}
-                visualError={visualError}
-                mindMapData={mindMapData}
-                mindMapLoading={mindMapLoading}
-                mindMapError={mindMapError}
-                canGenerateMindMap={hasIndexedDocuments}
-                onClose={() => setVisualStudioOpen(false)}
-                onTabChange={handleVisualStudioTab}
-                onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-                onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-                onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
-                onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
-              />
-            </aside>
-          )}
-
           <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
             {viewerFile && !viewerFile.toLowerCase().endsWith('.pdf') ? (
               viewerText ? (
@@ -3022,32 +3053,47 @@ export default function Home() {
         />
       )}
 
+      {visualStudioOpen && !quizOpen && !compareOpen && (
+        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
+          <div onMouseDown={startViewerResize} className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center" role="separator" aria-orientation="vertical" aria-label="Resize visual studio">
+            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+          </div>
+          <VisualPanel
+            embedded
+            tab={visualStudioTab}
+            visualData={visualCache}
+            visualLoading={visualLoading}
+            visualError={visualError}
+            mindMapData={mindMapData}
+            mindMapLoading={mindMapLoading}
+            mindMapError={mindMapError}
+            canGenerateMindMap={hasIndexedDocuments}
+            onClose={() => setVisualStudioOpen(false)}
+            onTabChange={handleVisualStudioTab}
+            onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+            onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+            onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
+            onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
+          />
+        </aside>
+      )}
+
       {quizOpen && quizConversationId === activeConversationId && (
-        <QuizPanel
-          key={`${quizConversationId}-${quizPanelVersion}`}
-          data={quizData}
-          loading={quizLoading}
-          error={quizError}
-          onClose={handleCloseQuiz}
-          onGenerate={handleGenerateQuiz}
-        />
+        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
+          <div onMouseDown={startViewerResize} className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center" role="separator" aria-orientation="vertical" aria-label="Resize quiz panel">
+            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+          </div>
+          <QuizPanel key={`${quizConversationId}-${quizPanelVersion}`} data={quizData} loading={quizLoading} error={quizError} onClose={handleCloseQuiz} onGenerate={handleGenerateQuiz} embedded />
+        </aside>
       )}
 
       {compareOpen && compareConversationId === activeConversationId && (
-        <ComparePanel
-          files={[
-            ...new Set(
-              activeChatFiles
-                .filter((file) => file.status === 'completed')
-                .map((file) => file.name),
-            ),
-          ]}
-          data={compareData}
-          loading={compareLoading}
-          error={compareError}
-          onClose={handleCloseCompare}
-          onCompare={handleCompareDocuments}
-        />
+        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
+          <div onMouseDown={startViewerResize} className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center" role="separator" aria-orientation="vertical" aria-label="Resize compare panel">
+            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+          </div>
+          <ComparePanel files={[...new Set(activeChatFiles.filter((file) => file.status === 'completed').map((file) => file.name))]} data={compareData} loading={compareLoading} error={compareError} onClose={handleCloseCompare} onCompare={handleCompareDocuments} embedded />
+        </aside>
       )}
 
       {printExport && (
