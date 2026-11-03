@@ -193,7 +193,7 @@ function ArtifactPanel({
         </button>
       </header>
       {artifacts.length === 0 ? (
-        <p className="text-sm text-slate-500 dark:text-slate-400">
+        <p className="p-4 text-sm text-slate-500 dark:text-slate-400">
           Generated mind maps, charts, quizzes, and comparisons will appear here.
         </p>
       ) : (
