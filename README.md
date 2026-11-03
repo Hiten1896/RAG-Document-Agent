@@ -67,10 +67,11 @@ Set these in a local `.env` file; never commit that file:
 
 ```env
 GOOGLE_API_KEY=
-GEMINI_MODEL=gemini-3.8-flash
+GEMINI_MODEL=gemini-3.5-flash-lite
 GEMINI_MODELS=gemini-3.5-flash-lite,gemini-3.8-flash
 GEMINI_API_KEYS=
 GEMINI_MODEL_RPM=gemini-3.5-flash-lite:12,gemini-3.8-flash:4
+GEMINI_MODEL_RPD=gemini-3.5-flash-lite:450,gemini-3.8-flash:18
 JINA_API_KEY=
 GROQ_API_KEY=
 GROQ_MODEL=qwen/qwen3.8-27b

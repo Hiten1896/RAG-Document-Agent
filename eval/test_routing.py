@@ -1,4 +1,5 @@
 import unittest
+from collections import deque
 from unittest.mock import patch
 
 from app.gemini_client import (
@@ -84,6 +85,31 @@ class RoutingTests(unittest.TestCase):
         result = client.invoke("prompt", "query")
         self.assertEqual(result.response, "second key answered")
         self.assertEqual(result.model, "model")
+
+    def test_gemini_rpd_skips_capped_pair_and_resets_at_pacific_midnight(self):
+        with patch.object(GeminiClient, "_check_models"):
+            client = GeminiClient(api_keys=["key-1"], models=["model"])
+        client._model_rpd = {"model": 1}
+        client._limiters[(0, "model")] = type(
+            "Limiter", (), {"acquire": lambda self: None, "interval": 5, "recent": lambda self: 0}
+        )()
+        client._daily_calls.setdefault((0, "model"), deque()).append(1000)
+        fake_provider = FakeProvider(response="should not be called")
+        client._client_for = lambda model, key: fake_provider
+
+        with patch("app.gemini_client._pacific_day_start", return_value=900):
+            status = client.status()
+            self.assertEqual(status["pairs"][0]["calls_today"], 1)
+            self.assertEqual(status["pairs"][0]["rpd_limit"], 1)
+            self.assertEqual(status["pairs"][0]["remaining"], 0)
+            with self.assertRaises(GeminiExhaustedError):
+                client.invoke("prompt", "query")
+        self.assertEqual(fake_provider.calls, [])
+
+        with patch("app.gemini_client._pacific_day_start", return_value=1100):
+            status = client.status()
+            self.assertEqual(status["pairs"][0]["calls_today"], 0)
+            self.assertEqual(status["pairs"][0]["remaining"], 1)
 
     def test_all_gemini_exhausted_falls_to_groq(self):
         gemini = FakeProvider(

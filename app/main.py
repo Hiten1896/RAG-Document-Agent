@@ -991,7 +991,7 @@ def llm_status() -> Dict[str, Any]:
             "providers": {
                 name: {
                     "configured": value,
-                    "configured_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+                    "configured_model": os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
                     if name == "gemini"
                     else os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
                     "fallback_model": None,

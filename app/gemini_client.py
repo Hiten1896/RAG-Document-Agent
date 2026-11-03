@@ -124,7 +124,7 @@ def _load_api_keys() -> List[str]:
     return keys
 
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_MODELS = _parse_csv_env(
     os.getenv("GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-3.8-flash")
 )
@@ -145,6 +145,31 @@ def _gemini_model_rpm() -> Dict[str, float]:
             except ValueError:
                 logger.warning("Ignoring invalid GEMINI_MODEL_RPM entry: %s", pair)
     return result
+
+
+def _gemini_model_rpd() -> Dict[str, int]:
+    result: Dict[str, int] = {}
+    for pair in _parse_csv_env(
+        os.getenv("GEMINI_MODEL_RPD", "gemini-3.5-flash-lite:450,gemini-3.8-flash:18")
+    ):
+        model, separator, value = pair.partition(":")
+        if separator:
+            try:
+                result[model.strip()] = max(1, int(value))
+            except ValueError:
+                logger.warning("Ignoring invalid GEMINI_MODEL_RPD entry: %s", pair)
+    return result
+
+
+def _pacific_day_start(timestamp: Optional[float] = None) -> float:
+    try:
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo("America/Los_Angeles")
+    except Exception:
+        zone = timezone.utc
+    current = datetime.fromtimestamp(time.time() if timestamp is None else timestamp, zone)
+    return datetime.combine(current.date(), datetime.min.time(), tzinfo=zone).timestamp()
 
 
 def _next_midnight_pacific() -> float:
@@ -202,6 +227,7 @@ class GeminiClient:
         self._current_key_index = 0
         self._clients: Dict[Tuple[str, str], ChatGoogleGenerativeAI] = {}
         self._model_rpm = _gemini_model_rpm()
+        self._model_rpd = _gemini_model_rpd()
         self._limiters: Dict[Tuple[int, str], ProviderLimiter] = {}
         self._blocked: Dict[Tuple[int, str], float] = {}
         self._last_error: Dict[Tuple[int, str], str] = {}
@@ -223,6 +249,19 @@ class GeminiClient:
         until = self._blocked.get((key_index, model), 0)
         return until if until > time.monotonic() else None
 
+    def _daily_calls_for(self, key_index: int, model: str) -> deque[float]:
+        calls = self._daily_calls.setdefault((key_index, model), deque())
+        day_start = _pacific_day_start()
+        while calls and calls[0] < day_start:
+            calls.popleft()
+        return calls
+
+    def _rpd_remaining(self, key_index: int, model: str) -> Optional[int]:
+        limit = self._model_rpd.get(model)
+        if limit is None:
+            return None
+        return max(0, limit - len(self._daily_calls_for(key_index, model)))
+
     def _mark_error(self, key_index: int, model: str, kind: str, retry_after: Optional[float] = None) -> None:
         pair = (key_index, model)
         self._last_error[pair] = kind
@@ -240,9 +279,7 @@ class GeminiClient:
         pairs = []
         for key_index, _key in enumerate(self.api_keys):
             for model in self.models:
-                calls = self._daily_calls.get((key_index, model), deque())
-                while calls and time.time() - calls[0] >= 86400:
-                    calls.popleft()
+                calls = self._daily_calls_for(key_index, model)
                 limiter = self._limiter_for(key_index, model)
                 blocked = self._blocked_for(key_index, model)
                 pairs.append(
@@ -250,6 +287,8 @@ class GeminiClient:
                         "key": f"key {key_index + 1}",
                         "model": model,
                         "rpm_limit": round(60 / limiter.interval, 2),
+                        "rpd_limit": self._model_rpd.get(model),
+                        "remaining": self._rpd_remaining(key_index, model),
                         "blocked_until": (
                             time.time() + (blocked - now) if blocked else None
                         ),
@@ -328,13 +367,19 @@ class GeminiClient:
             for key_index, key in enumerate(self.api_keys):
                 if self._blocked_for(key_index, model):
                     continue
+                rpd_limit = self._model_rpd.get(model)
+                daily_calls = self._daily_calls_for(key_index, model)
+                if rpd_limit is not None and len(daily_calls) >= rpd_limit:
+                    last_kind = "daily_quota"
+                    self._last_error[(key_index, model)] = last_kind
+                    continue
                 try:
                     self._limiter_for(key_index, model).acquire()
                 except ProviderUnavailableError as exc:
                     last_kind = "busy"
                     last_error = exc
                     continue
-                self._daily_calls.setdefault((key_index, model), deque()).append(time.time())
+                daily_calls.append(time.time())
                 started = time.perf_counter()
                 try:
                     response = self._client_for(model, key).invoke(prompt)
@@ -393,13 +438,19 @@ class GeminiClient:
             for key_index, key in enumerate(self.api_keys):
                 if self._blocked_for(key_index, model):
                     continue
+                rpd_limit = self._model_rpd.get(model)
+                daily_calls = self._daily_calls_for(key_index, model)
+                if rpd_limit is not None and len(daily_calls) >= rpd_limit:
+                    last_kind = "daily_quota"
+                    self._last_error[(key_index, model)] = last_kind
+                    continue
                 try:
                     self._limiter_for(key_index, model).acquire()
                 except ProviderUnavailableError as exc:
                     last_kind = "busy"
                     last_error = exc
                     continue
-                self._daily_calls.setdefault((key_index, model), deque()).append(time.time())
+                daily_calls.append(time.time())
                 started = time.perf_counter()
                 iterator: Optional[Iterator[Any]] = None
                 try:
@@ -551,18 +602,22 @@ class GroqClient:
         )
 
     def _post(self, prompt: str, feature: str, retry_5xx: bool = False) -> requests.Response:
+        structured = feature in {"mindmap", "diagram", "explainer", "chart", "quiz", "compare", "followup"}
         for attempt in range(2 if retry_5xx else 1):
-            response = self._session.post(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            json={
+            payload = {
                 "model": self.model,
                 "temperature": self.temperature,
                 "tools": [],
-                "max_tokens": 600,
+                "max_tokens": 1200 if structured else 600,
                 "reasoning_format": "hidden",
                 "messages": [{"role": "user", "content": prompt}],
-            },
+            }
+            if structured:
+                payload["response_format"] = {"type": "json_object"}
+            response = self._session.post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json=payload,
             timeout=15,
             )
             logger.info("llm_call feature=%s provider=groq model=%s attempt=%s prompt_chars=%s status=%s", feature, self.model, attempt + 1, len(prompt), response.status_code)
