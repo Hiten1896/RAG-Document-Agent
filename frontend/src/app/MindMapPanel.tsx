@@ -22,6 +22,7 @@ interface MindMapPanelProps {
   onClose: () => void;
   onRetry: () => void;
   onRegenerate: () => void;
+  embedded?: boolean;
 }
 
 function escapeHeading(value: string): string {
@@ -81,6 +82,7 @@ export default function MindMapPanel({
   onClose,
   onRetry,
   onRegenerate,
+  embedded = false,
 }: MindMapPanelProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const markmapRef = useRef<Markmap | null>(null);
@@ -267,7 +269,7 @@ export default function MindMapPanel({
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5"
+      className={embedded ? 'flex h-full min-h-[520px] w-full flex-col' : 'fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5'}
       role="dialog"
       aria-modal="true"
       aria-label="Document mind map"
@@ -275,7 +277,7 @@ export default function MindMapPanel({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <section className="flex h-full max-h-[900px] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
+      <section className={embedded ? 'flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900' : 'flex h-full max-h-[900px] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900'}>
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-5">
           <div className="min-w-0">
             <h2 className="truncate text-base font-semibold text-slate-900 dark:text-slate-100">

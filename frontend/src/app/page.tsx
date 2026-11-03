@@ -72,6 +72,7 @@ import {
   BarChart3,
   CircleHelp,
 } from 'lucide-react';
+import type { VisualStudioTab } from './VisualPanel';
 
 // react-pdf renders PDFs itself via pdf.js instead of relying on the
 // browser's built-in PDF plugin. That built-in-plugin path (a plain
@@ -117,6 +118,7 @@ const MindMapPanel = dynamic(() => import('./MindMapPanel'), {
     </div>
   ),
 });
+void MindMapPanel;
 
 const QuizPanel = dynamic(() => import('./QuizPanel'), {
   ssr: false,
@@ -768,17 +770,17 @@ export default function Home() {
   const [viewerPage, setViewerPage] = useState<number | null>(null);
   const [viewerLocation, setViewerLocation] = useState<string | null>(null);
   const [viewerText, setViewerText] = useState<string | null>(null);
-  const [mindMapOpen, setMindMapOpen] = useState(false);
+  const [visualStudioOpen, setVisualStudioOpen] = useState(false);
+  const [visualStudioTab, setVisualStudioTab] = useState<VisualStudioTab>('mindmap');
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
   const [mindMapError, setMindMapError] = useState<string | null>(null);
   const [mindMapTopic, setMindMapTopic] = useState('');
   const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
-  const [visualKind, setVisualKind] = useState<VisualKind | null>(null);
-  const [visualData, setVisualData] = useState<VisualResponse | null>(null);
+  const [visualCache, setVisualCache] = useState<Partial<Record<VisualKind, VisualResponse | null>>>({});
+  const [visualCacheConversationId, setVisualCacheConversationId] = useState(activeConversationId);
   const [visualLoading, setVisualLoading] = useState(false);
   const [visualError, setVisualError] = useState<string | null>(null);
-  const [visualConversationId, setVisualConversationId] = useState(activeConversationId);
   const [quizOpen, setQuizOpen] = useState(false);
   const [quizData, setQuizData] = useState<QuizResponse | null>(null);
   const [quizLoading, setQuizLoading] = useState(false);
@@ -1362,11 +1364,17 @@ export default function Home() {
   const handleGenerateMindMap = async (topic?: string, regenerate = false) => {
     const normalizedTopic = topic?.trim() || '';
     const targetConversationId = activeConversationId;
-    setMindMapOpen(true);
+    const hasCurrentMindMap = mindMapConversationId === targetConversationId;
+    setVisualStudioOpen(true);
+    setVisualStudioTab('mindmap');
     setMindMapConversationId(targetConversationId);
     setMindMapError(null);
     setMindMapTopic(normalizedTopic);
-    if (!regenerate) setMindMapData(null);
+    if (!regenerate && hasCurrentMindMap && mindMapData) {
+      setMindMapLoading(false);
+      return;
+    }
+    if (regenerate) setMindMapData(null);
 
     if (
       !ingestedFiles.some(
@@ -1400,13 +1408,21 @@ export default function Home() {
     }
   };
 
-  const handleGenerateVisual = async (kind: VisualKind, topic = '') => {
+  const handleGenerateVisual = async (kind: VisualKind, topic = '', regenerate = false) => {
     const targetConversationId = activeConversationId;
-    setVisualKind(kind);
-    setVisualConversationId(targetConversationId);
-    setVisualData(null);
+    const hasCurrentCache = visualCacheConversationId === targetConversationId;
+    setVisualStudioOpen(true);
+    setVisualStudioTab(kind);
+    if (!regenerate && hasCurrentCache && visualCache[kind]) {
+      setVisualLoading(false);
+      return;
+    }
     setVisualError(null);
     setVisualLoading(true);
+    if (!hasCurrentCache) {
+      setVisualCache({});
+      setVisualCacheConversationId(targetConversationId);
+    }
     if (!ingestedFiles.some((file) => file.chatId === targetConversationId && file.status === 'completed')) {
       setVisualError('Upload a document to create a grounded visual.');
       setVisualLoading(false);
@@ -1414,11 +1430,22 @@ export default function Home() {
     }
     try {
       const result = await generateVisual(kind, targetConversationId, topic);
-      if (activeConversationId === targetConversationId) setVisualData(result);
+      if (activeConversationId === targetConversationId) {
+        setVisualCache((previous) => ({ ...previous, [kind]: result }));
+      }
     } catch (err: unknown) {
       if (activeConversationId === targetConversationId) setVisualError(getErrorMessage(err, 'Could not generate the visual.'));
     } finally {
       if (activeConversationId === targetConversationId) setVisualLoading(false);
+    }
+  };
+
+  const handleVisualStudioTab = (tab: VisualStudioTab) => {
+    setVisualStudioTab(tab);
+    if (tab === 'mindmap') {
+      void handleGenerateMindMap(mindMapTopic);
+    } else {
+      void handleGenerateVisual(tab);
     }
   };
 
@@ -3172,26 +3199,22 @@ export default function Home() {
         />
       )}
 
-      {mindMapOpen && mindMapConversationId === activeConversationId && (
-        <MindMapPanel
-          data={mindMapData}
-          loading={mindMapLoading}
-          error={mindMapError}
-          canGenerate={hasIndexedDocuments}
-          onClose={() => setMindMapOpen(false)}
-          onRetry={() => void handleGenerateMindMap(mindMapTopic)}
-          onRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
-        />
-      )}
-
-      {visualKind && visualConversationId === activeConversationId && (
+      {visualStudioOpen && (
         <VisualPanel
-          kind={visualKind}
-          data={visualData}
-          loading={visualLoading}
-          error={visualError}
-          onClose={() => setVisualKind(null)}
-          onRetry={() => void handleGenerateVisual(visualKind)}
+          tab={visualStudioTab}
+          visualData={visualCache}
+          visualLoading={visualLoading}
+          visualError={visualError}
+          mindMapData={mindMapData}
+          mindMapLoading={mindMapLoading}
+          mindMapError={mindMapError}
+          canGenerateMindMap={hasIndexedDocuments}
+          onClose={() => setVisualStudioOpen(false)}
+          onTabChange={handleVisualStudioTab}
+          onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+          onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+          onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
+          onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
         />
       )}
 

@@ -2,17 +2,28 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Download, Loader2, RefreshCw } from 'lucide-react';
-import type { VisualChart, VisualDiagram, VisualExplainer, VisualKind, VisualResponse } from '@/lib/api';
+import type { MindMapResponse, VisualChart, VisualDiagram, VisualExplainer, VisualKind, VisualResponse } from '@/lib/api';
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import ModalShell from './ModalShell';
+import MindMapPanel from './MindMapPanel';
+
+export type VisualStudioTab = 'mindmap' | VisualKind;
 
 interface Props {
-  kind: VisualKind;
-  data: VisualResponse | null;
-  loading: boolean;
-  error: string | null;
+  tab: VisualStudioTab;
+  visualData: Partial<Record<VisualKind, VisualResponse | null>>;
+  visualLoading: boolean;
+  visualError: string | null;
+  mindMapData: MindMapResponse | null;
+  mindMapLoading: boolean;
+  mindMapError: string | null;
+  canGenerateMindMap: boolean;
   onClose: () => void;
+  onTabChange: (tab: VisualStudioTab) => void;
   onRetry: () => void;
+  onRegenerate: () => void;
+  onMindMapRetry: () => void;
+  onMindMapRegenerate: () => void;
 }
 
 const colors = ['#6366f1', '#14b8a6', '#f59e0b', '#f43f5e', '#8b5cf6', '#06b6d4'];
@@ -85,13 +96,19 @@ function ChartView({ data }: { data: VisualChart }) {
   return <><h3 className="mb-1 text-lg font-semibold">{data.title}</h3><div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%">{chart}</ResponsiveContainer></div><Source value={data.source} /><div className="mt-3 flex gap-2"><button type="button" onClick={() => downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'visual-chart.json')} className="visual-download"><Download className="h-3.5 w-3.5" />Download data</button></div></>;
 }
 
-export default function VisualPanel({ kind, data, loading, error, onClose, onRetry }: Props) {
+export default function VisualPanel({ tab, visualData, visualLoading, visualError, mindMapData, mindMapLoading, mindMapError, canGenerateMindMap, onClose, onTabChange, onRetry, onRegenerate, onMindMapRetry, onMindMapRegenerate }: Props) {
+  const kind = tab === 'mindmap' ? null : tab;
+  const data = kind ? visualData[kind] ?? null : null;
+  const loading = tab === 'mindmap' ? mindMapLoading : visualLoading;
+  const error = tab === 'mindmap' ? mindMapError : visualError;
   return <ModalShell title="Visual studio" label="Grounded visual answer" onClose={onClose}>
       <nav className="mb-4 flex gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-slate-800" aria-label="Visual studio tabs">
-        {(['diagram', 'explainer', 'chart'] as const).map((tab) => <span key={tab} className={`rounded-lg px-3 py-2 text-xs font-semibold ${tab === kind ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-200' : 'text-slate-500 dark:text-slate-400'}`}>{tab === 'explainer' ? 'Explain' : tab[0].toUpperCase() + tab.slice(1)}</span>)}
+        {(['mindmap', 'diagram', 'explainer', 'chart'] as const).map((nextTab) => <button key={nextTab} type="button" onClick={() => onTabChange(nextTab)} className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold ${nextTab === tab ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-200' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'}`}>{nextTab === 'mindmap' ? 'Mind map' : nextTab === 'explainer' ? 'Explain' : nextTab[0].toUpperCase() + nextTab.slice(1)}</button>)}
       </nav>
+      {tab === 'mindmap' && <MindMapPanel data={mindMapData} loading={mindMapLoading} error={mindMapError} canGenerate={canGenerateMindMap} onClose={onClose} onRetry={onMindMapRetry} onRegenerate={onMindMapRegenerate} embedded />}
+      {tab !== 'mindmap' && <div className="mb-4 flex justify-end"><button type="button" onClick={onRegenerate} disabled={loading} className="visual-download"><RefreshCw className="h-3.5 w-3.5" />Regenerate</button></div>}
       {loading && <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin" />Preparing a grounded visual…</div>}
-      {!loading && error && <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-center"><p className="text-sm text-rose-600 dark:text-rose-300">{error}</p><button type="button" onClick={onRetry} className="visual-download"><RefreshCw className="h-3.5 w-3.5" />Retry</button></div>}
-      {!loading && !error && data && (kind === 'diagram' ? <DiagramView data={data as VisualDiagram} /> : kind === 'explainer' ? <ExplainerView data={data as VisualExplainer} /> : <ChartView data={data as VisualChart} />)}
+      {tab !== 'mindmap' && !loading && error && <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-center"><p className="text-sm text-rose-600 dark:text-rose-300">{error}</p><button type="button" onClick={onRetry} className="visual-download"><RefreshCw className="h-3.5 w-3.5" />Retry</button></div>}
+      {tab !== 'mindmap' && !loading && !error && data && (kind === 'diagram' ? <DiagramView data={data as VisualDiagram} /> : kind === 'explainer' ? <ExplainerView data={data as VisualExplainer} /> : <ChartView data={data as VisualChart} />)}
   </ModalShell>;
 }

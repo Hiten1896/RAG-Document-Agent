@@ -113,8 +113,11 @@ Query sources carry a numeric `page` where available and a `location` label for
 slides, sheets, or unpaginated text; the frontend uses these fields for citation
 navigation.
 
-Visual answers are available from the single **Visualize** entry: diagrams,
-visual explanation cards, and small document-number charts. They use the active chat's session
+Visual answers are available from the single **Visualize** entry: one shared
+Visual studio with Mind map, Diagram, Explain, and Chart tabs. Each tab caches
+its result for the active chat; use Regenerate to request a fresh result. The
+studio adapts its Fit/export toolbar to the active visual and uses the same
+responsive modal shell as Compare documents and Quiz me. All visuals use the active chat's session
 filter, keep a source label on every visual item, render model text as plain
 text, and refuse chart values that are not present in retrieved context.
 
