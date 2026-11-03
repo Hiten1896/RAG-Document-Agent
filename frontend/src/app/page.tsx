@@ -181,7 +181,6 @@ function ArtifactPanel({
       <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5 dark:border-slate-800/80">
         <div className="min-w-0">
           <h2 className="truncate text-sm font-medium text-slate-800 dark:text-slate-200">Artifacts</h2>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Reopen generated results</p>
         </div>
         <button
           type="button"
