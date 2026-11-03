@@ -269,7 +269,7 @@ export default function MindMapPanel({
 
   return (
     <div
-      className={embedded ? 'flex h-full min-h-[760px] w-full flex-col' : 'fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5'}
+      className={embedded ? 'flex h-full min-h-0 w-full flex-col' : 'fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5'}
       role="dialog"
       aria-modal="true"
       aria-label="Document mind map"
@@ -278,21 +278,21 @@ export default function MindMapPanel({
       }}
     >
       <section className={embedded ? 'flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900' : 'flex h-full max-h-[900px] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900'}>
-        <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3 dark:border-slate-800 sm:px-5">
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 dark:border-slate-800">
           <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-slate-900 dark:text-slate-100">
+            <h2 className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">
               {data?.title || 'Document mind map'}
             </h2>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
               Built only from the documents in this chat
             </p>
           </div>
-          <div className="flex flex-wrap items-center justify-end gap-1">
+          <div className="flex flex-wrap items-center justify-end gap-0.5">
             <button
               type="button"
               onClick={handleFit}
               disabled={!data || loading}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="inline-flex min-h-8 items-center gap-1 rounded-lg px-2 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
               title="Fit to screen"
               aria-label="Fit to screen"
             >
@@ -303,7 +303,7 @@ export default function MindMapPanel({
               type="button"
               onClick={handleDownloadSvg}
               disabled={!data || loading}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="inline-flex min-h-8 items-center gap-1 rounded-lg px-2 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
               title="Download SVG"
               aria-label="Download SVG"
             >
@@ -314,7 +314,7 @@ export default function MindMapPanel({
               type="button"
               onClick={() => void handleDownloadPng()}
               disabled={!data || loading}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="inline-flex min-h-8 items-center gap-1 rounded-lg px-2 text-xs text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
               title="Download PNG"
               aria-label="Download PNG"
             >
@@ -325,7 +325,7 @@ export default function MindMapPanel({
               type="button"
               onClick={onRegenerate}
               disabled={!canGenerate || loading}
-              className="inline-flex min-h-10 items-center gap-1.5 rounded-lg px-2.5 text-xs text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 dark:text-indigo-300 dark:hover:bg-indigo-500/10"
+              className="inline-flex min-h-8 items-center gap-1 rounded-lg px-2 text-xs text-indigo-600 hover:bg-indigo-50 disabled:opacity-40 dark:text-indigo-300 dark:hover:bg-indigo-500/10"
               title="Regenerate"
               aria-label="Regenerate mind map"
             >
@@ -339,7 +339,7 @@ export default function MindMapPanel({
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex min-h-10 min-w-10 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+              className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
               aria-label="Close mind map"
             >
               <X className="h-4 w-4" />
