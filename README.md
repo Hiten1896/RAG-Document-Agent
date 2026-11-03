@@ -45,20 +45,21 @@ provided.
 
 ## LLM providers
 
-Gemini is tried first by default, with Groq as the fallback:
+Text features prefer Groq; visual features prefer Gemini:
 
 ```text
-LLM_PROVIDER_ORDER=gemini,groq
+LLM_ROUTE_TEXT=groq,gemini
+LLM_ROUTE_VISUAL=gemini,groq
 ```
 
 The router uses temperature `0.2`, no tools, and no search grounding. A provider
 that returns a quota/rate-limit response is placed behind a short in-memory
 circuit breaker (60–120 seconds, honoring `Retry-After`); transient 503s and
 timeouts do not block it. Authentication failures are skipped until restart.
-Gemini uses `GEMINI_MODEL` and tries `GEMINI_FALLBACK_MODEL` when the primary
-model is not found. Groq uses `GROQ_MODEL`, defaulting to
-`llama-3.1-8b-instant`. The process-local request limits default to
-`GEMINI_RPM=8` and `GROQ_RPM=20`; set each slightly below your AI Studio limit.
+Gemini uses `GEMINI_MODELS` and tries each model/key combination before Groq;
+`GEMINI_MODEL`, when set, is always first. Per-model limits use
+`GEMINI_MODEL_RPM` pairs, set slightly below the limit shown in AI Studio >
+Rate Limit. Text routes prefer Groq; visual features prefer Gemini.
 
 ## Environment variables
 
@@ -67,13 +68,14 @@ Set these in a local `.env` file; never commit that file:
 ```env
 GOOGLE_API_KEY=
 GEMINI_MODEL=gemini-3.8-flash
-GEMINI_FALLBACK_MODEL=gemini-3.5-flash-lite
-GEMINI_RPM=8
+GEMINI_MODELS=gemini-3.5-flash-lite,gemini-3.8-flash
+GEMINI_API_KEYS=
+GEMINI_MODEL_RPM=gemini-3.5-flash-lite:12,gemini-3.8-flash:4
 JINA_API_KEY=
 GROQ_API_KEY=
-GROQ_MODEL=llama-3.1-8b-instant
-GROQ_RPM=20
-LLM_PROVIDER_ORDER=gemini,groq
+GROQ_MODEL=qwen/qwen3.8-27b
+LLM_ROUTE_TEXT=groq,gemini
+LLM_ROUTE_VISUAL=gemini,groq
 GROQ_MAX_CONTEXT_CHARS=12000
 PROMPT_VERSION=strict
 ```

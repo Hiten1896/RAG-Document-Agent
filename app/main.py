@@ -302,7 +302,7 @@ def get_llm_client() -> LLMClient:
 def _llm_unavailable_detail(exc: ProviderUnavailableError) -> Dict[str, Any]:
     kind = getattr(exc, "kind", "unavailable")
     retry_after = getattr(exc, "retry_after", None)
-    if kind in {"quota", "busy"} and retry_after:
+    if retry_after:
         message = f"Providers busy, retry in {max(1, round(retry_after))} s"
     elif kind == "quota":
         message = "AI is busy (quota/rate limit). Try again in a few minutes."
@@ -993,12 +993,8 @@ def llm_status() -> Dict[str, Any]:
                     "configured": value,
                     "configured_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
                     if name == "gemini"
-                    else os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
-                    "fallback_model": os.getenv(
-                        "GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite"
-                    )
-                    if name == "gemini"
-                    else None,
+                    else os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b"),
+                    "fallback_model": None,
                     "blocked_until": None,
                     "last_error_kind": "configuration" if not value else "unknown",
                     "calls_last_60s": 0,
