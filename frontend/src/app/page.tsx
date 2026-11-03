@@ -788,6 +788,8 @@ export default function Home() {
   const [quizConversationId, setQuizConversationId] = useState(activeConversationId);
   const [quizPanelVersion, setQuizPanelVersion] = useState(0);
   const quizRequestIdRef = useRef(0);
+  const mindMapRequestRef = useRef(false);
+  const visualRequestRef = useRef(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareData, setCompareData] = useState<CompareResponse | null>(null);
   const [compareLoading, setCompareLoading] = useState(false);
@@ -1365,6 +1367,7 @@ export default function Home() {
     const normalizedTopic = topic?.trim() || '';
     const targetConversationId = activeConversationId;
     const hasCurrentMindMap = mindMapConversationId === targetConversationId;
+    if (mindMapRequestRef.current) return;
     setVisualStudioOpen(true);
     setVisualStudioTab('mindmap');
     setMindMapConversationId(targetConversationId);
@@ -1389,6 +1392,7 @@ export default function Home() {
     }
 
     setMindMapLoading(true);
+    mindMapRequestRef.current = true;
     try {
       const result = await generateMindMap(targetConversationId, {
         ...(normalizedTopic ? { topic: normalizedTopic } : {}),
@@ -1405,12 +1409,14 @@ export default function Home() {
       if (activeConversationId === targetConversationId) {
         setMindMapLoading(false);
       }
+      mindMapRequestRef.current = false;
     }
   };
 
   const handleGenerateVisual = async (kind: VisualKind, topic = '', regenerate = false) => {
     const targetConversationId = activeConversationId;
     const hasCurrentCache = visualCacheConversationId === targetConversationId;
+    if (visualRequestRef.current) return;
     setVisualStudioOpen(true);
     setVisualStudioTab(kind);
     if (!regenerate && hasCurrentCache && visualCache[kind]) {
@@ -1419,6 +1425,7 @@ export default function Home() {
     }
     setVisualError(null);
     setVisualLoading(true);
+    visualRequestRef.current = true;
     if (!hasCurrentCache) {
       setVisualCache({});
       setVisualCacheConversationId(targetConversationId);
@@ -1437,6 +1444,7 @@ export default function Home() {
       if (activeConversationId === targetConversationId) setVisualError(getErrorMessage(err, 'Could not generate the visual.'));
     } finally {
       if (activeConversationId === targetConversationId) setVisualLoading(false);
+      visualRequestRef.current = false;
     }
   };
 
@@ -1462,7 +1470,6 @@ export default function Home() {
 
     setSuggestionNotice(null);
     setQuizConversationId(activeConversationId);
-    setQuizData(null);
     setQuizError(null);
     setQuizOpen(true);
   };
@@ -1510,7 +1517,6 @@ export default function Home() {
   const handleOpenCompare = () => {
     setSuggestionNotice(null);
     setCompareConversationId(activeConversationId);
-    setCompareData(null);
     setCompareError(null);
     setCompareOpen(true);
   };
@@ -1747,6 +1753,7 @@ export default function Home() {
       .reverse()
       .find((message) => message.sender === 'user')?.text;
     if (!previousQuestion) return;
+    if (messages[index]?.followupsLoading || messages[index]?.followups) return;
 
     const updateMessage = (changes: Partial<Message>) => {
       setMessagesForActive((previous) => {
