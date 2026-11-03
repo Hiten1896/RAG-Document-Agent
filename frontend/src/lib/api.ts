@@ -37,7 +37,10 @@ export type QueryStreamEvent =
       event: 'done';
       data: { answer: string; sources: SourceMetadata[]; debug?: QueryDebug };
     }
-  | { event: 'error'; data: { message: string; streamed: boolean } };
+  | {
+      event: 'error';
+      data: { message: string; streamed: boolean; retry_after?: number };
+    };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -154,7 +157,13 @@ function parseQueryStreamEvent(
     }
     return {
       event: 'error',
-      data: { message: value.message, streamed: value.streamed },
+      data: {
+        message: value.message,
+        streamed: value.streamed,
+        ...(typeof value.retry_after === 'number'
+          ? { retry_after: value.retry_after }
+          : {}),
+      },
     };
   }
   return null;
@@ -413,7 +422,12 @@ function extractErrorMessage(errorData: unknown, fallback: string): string {
     return fallback;
   }
 
+  const topLevelMessage = (errorData as { message?: unknown }).message;
   const detail = (errorData as { detail?: unknown }).detail;
+
+  if (typeof topLevelMessage === 'string' && topLevelMessage.trim()) {
+    return topLevelMessage;
+  }
 
   if (typeof detail === 'string' && detail.trim()) {
     return detail;
@@ -436,11 +450,12 @@ function extractErrorMessage(errorData: unknown, fallback: string): string {
   }
 
   if (detail && typeof detail === 'object') {
-    if ('msg' in detail) return String((detail as { msg?: unknown }).msg);
-    try {
-      return JSON.stringify(detail);
-    } catch {
-      return fallback;
+    const detailRecord = detail as { message?: unknown; msg?: unknown };
+    if (typeof detailRecord.message === 'string' && detailRecord.message.trim()) {
+      return detailRecord.message;
+    }
+    if (typeof detailRecord.msg === 'string' && detailRecord.msg.trim()) {
+      return detailRecord.msg;
     }
   }
 
@@ -454,7 +469,18 @@ async function parseErrorResponse(response: Response, fallback: string): Promise
   } catch {
     // response body wasn't JSON (e.g. HTML error page, empty body) — ignore
   }
-  const message = extractErrorMessage(errorData, fallback);
+  const retryAfter = response.headers.get('Retry-After');
+  const bodyRetryAfter =
+    errorData && typeof errorData === 'object' && 'detail' in errorData &&
+    errorData.detail && typeof errorData.detail === 'object' &&
+    'retry_after' in errorData.detail
+      ? Number(errorData.detail.retry_after)
+      : undefined;
+  const retrySeconds = Number(retryAfter) || bodyRetryAfter;
+  const message =
+    retrySeconds && retrySeconds > 0
+      ? `Busy, try again in ${Math.max(1, Math.round(retrySeconds))} s`
+      : extractErrorMessage(errorData, fallback);
   return new Error(message);
 }
 

@@ -511,14 +511,18 @@ function getErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === 'string' && err.trim()) return err;
   if (err && typeof err === 'object') {
-    const maybeDetail = (err as { detail?: unknown }).detail;
-    if (typeof maybeDetail === 'string' && maybeDetail.trim()) return maybeDetail;
-    const maybeMessage = (err as { message?: unknown }).message;
+    const error = err as { detail?: unknown; message?: unknown; retry_after?: unknown };
+    const maybeMessage = error.message;
     if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage;
-    try {
-      return JSON.stringify(err);
-    } catch {
-      return fallback;
+    if (typeof error.retry_after === 'number' && error.retry_after > 0) {
+      return `Busy, try again in ${Math.max(1, Math.round(error.retry_after))} s`;
+    }
+    const maybeDetail = error.detail;
+    if (maybeDetail && typeof maybeDetail === 'object') {
+      const detailMessage = (maybeDetail as { message?: unknown }).message;
+      if (typeof detailMessage === 'string' && detailMessage.trim()) return detailMessage;
+    } else if (typeof maybeDetail === 'string' && maybeDetail.trim()) {
+      return maybeDetail;
     }
   }
   return fallback;

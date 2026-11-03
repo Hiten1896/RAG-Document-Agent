@@ -298,15 +298,21 @@ def get_llm_client() -> LLMClient:
     return _llm_client
 
 
-def _llm_unavailable_detail(exc: ProviderUnavailableError) -> Dict[str, str]:
+def _llm_unavailable_detail(exc: ProviderUnavailableError) -> Dict[str, Any]:
     kind = getattr(exc, "kind", "unavailable")
-    if kind == "quota":
+    retry_after = getattr(exc, "retry_after", None)
+    if kind in {"quota", "busy"} and retry_after:
+        message = f"Busy, try again in {max(1, round(retry_after))} s"
+    elif kind == "quota":
         message = "AI is busy (quota/rate limit). Try again in a few minutes."
     elif kind == "auth":
         message = "AI is not authenticated. Check the configured provider keys."
     else:
         message = "AI providers are temporarily unavailable. Please retry."
-    return {"message": message, "kind": kind}
+    detail: Dict[str, Any] = {"message": message, "kind": kind}
+    if retry_after:
+        detail["retry_after"] = max(1, round(retry_after))
+    return detail
 
 
 # ------------------------------------------------------------------------------
@@ -1212,7 +1218,7 @@ async def query_document(
         )
         answer = message_to_text(llm_result.response)
     except ProviderUnavailableError as exc:
-        raise HTTPException(status_code=503, detail="AI service currently unavailable.") from exc
+        raise HTTPException(status_code=503, detail=_llm_unavailable_detail(exc)) from exc
     except Exception as exc:
         logger.exception("Answer generation failed")
         raise HTTPException(
@@ -1382,12 +1388,10 @@ async def stream_query_document(
                 )
             except ProviderUnavailableError as exc:
                 logger.warning("All answer stream providers failed before first token: %s", exc)
+                detail = _llm_unavailable_detail(exc)
                 yield _sse_event(
                     "error",
-                    {
-                        "message": "AI service currently unavailable. Please retry.",
-                        "streamed": False,
-                    },
+                    {**detail, "streamed": False},
                 )
                 return
             except Exception:

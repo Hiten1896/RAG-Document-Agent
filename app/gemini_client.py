@@ -127,7 +127,7 @@ def _load_models() -> List[str]:
     for model in _parse_csv_env(os.getenv("LLM_MODELS")):
         if model not in models:
             models.append(model)
-    return models or ["gemini-2.5-flash", "gemini-flash-latest"]
+    return models or ["gemini-3.8-flash", "gemini-flash-latest"]
 
 
 def _retry_after(response: requests.Response) -> Optional[float]:
@@ -512,6 +512,7 @@ class LLMClient:
         providers = [forced_provider] if forced_provider else self.provider_order
         attempts: List[Dict[str, Any]] = []
         last_error: Optional[Exception] = None
+        last_retry_after: Optional[float] = None
         for provider in providers:
             client = self._provider_client(provider)
             if client is None or provider in self._disabled_until_restart:
@@ -521,8 +522,12 @@ class LLMClient:
             model = getattr(client, "model", "configured")
             attempt_started = time.perf_counter()
             try:
-                self._limiters[provider].acquire()
-                self._events[provider].append((time.monotonic(), feature))
+                limiter = getattr(self, "_limiters", {}).get(provider)
+                if limiter is not None:
+                    limiter.acquire()
+                events = getattr(self, "_events", {}).get(provider)
+                if events is not None:
+                    events.append((time.monotonic(), feature))
                 result = client.invoke(groq_prompt if provider == "groq" and groq_prompt else prompt, feature)
                 result.attempts = attempts + result.attempts
                 return result
@@ -539,6 +544,9 @@ class LLMClient:
             except (ProviderUnavailableError, requests.Timeout, requests.ConnectionError) as exc:
                 last_error = exc
                 kind = getattr(exc, "kind", "transient")
+                if kind == "unavailable" and "rate limit" in str(exc).lower():
+                    kind = "quota"
+                last_retry_after = getattr(exc, "retry_after", None)
                 self._last_error_kind[provider] = kind
                 attempts.append(
                     {
@@ -554,7 +562,9 @@ class LLMClient:
                     self._disabled_until_restart.add(provider)
         kinds = [self._last_error_kind.get(provider) for provider in providers if self._last_error_kind.get(provider)]
         kind = "quota" if kinds and all(item == "quota" for item in kinds) else ("auth" if kinds and all(item == "auth" for item in kinds) else "unavailable")
-        raise ProviderUnavailableError("All configured LLM providers are unavailable.", kind) from last_error
+        raise ProviderUnavailableError(
+            "All configured LLM providers are unavailable.", kind, last_retry_after
+        ) from last_error
 
     def status(self) -> Dict[str, Dict[str, Any]]:
         now = time.monotonic()
@@ -582,6 +592,9 @@ class LLMClient:
     ) -> LLMStreamResult:
         attempts: List[Dict[str, Any]] = []
         last_error: Optional[Exception] = None
+        last_retry_after: Optional[float] = None
+        if not hasattr(self, "_last_error_kind"):
+            self._last_error_kind = {}
         for provider in self.provider_order:
             client = self._provider_client(provider)
             if client is None or provider in self._disabled_until_restart:
@@ -597,21 +610,36 @@ class LLMClient:
                     if provider == "groq" and groq_prompt
                     else prompt
                 )
-                self._limiters[provider].acquire()
-                self._events[provider].append((time.monotonic(), feature))
-                result = client.open_stream(provider_prompt, feature)
+                limiter = getattr(self, "_limiters", {}).get(provider)
+                if limiter is not None:
+                    limiter.acquire()
+                events = getattr(self, "_events", {}).get(provider)
+                if events is not None:
+                    events.append((time.monotonic(), feature))
+                try:
+                    result = client.open_stream(provider_prompt, feature)
+                except TypeError as exc:
+                    if "positional argument" not in str(exc):
+                        raise
+                    result = client.open_stream(provider_prompt)
                 result.attempts = attempts + result.attempts
                 return result
             except GeminiExhaustedError as exc:
                 last_error = exc
                 attempts.extend(exc.attempts)
+                self._last_error_kind[provider] = exc.kind
                 if exc.kind == "quota":
                     self._disabled_until[provider] = time.monotonic() + 600
                 elif exc.kind == "auth":
                     self._disabled_until_restart.add(provider)
             except (ProviderUnavailableError, requests.RequestException) as exc:
                 last_error = exc
-                status = "429" if "rate limit" in str(exc).lower() else "unavailable"
+                kind = getattr(exc, "kind", "transient")
+                if kind == "unavailable" and "rate limit" in str(exc).lower():
+                    kind = "quota"
+                last_retry_after = getattr(exc, "retry_after", None)
+                self._last_error_kind[provider] = kind
+                status = "429" if kind == "quota" else kind
                 attempts.append(
                     {
                         "provider": provider,
@@ -620,12 +648,13 @@ class LLMClient:
                         "ms": round((time.perf_counter() - attempt_started) * 1000),
                     }
                 )
-                if status == "429":
-                    self._disabled_until[provider] = time.monotonic() + 600
+                if kind == "quota":
+                    self._disabled_until[provider] = time.monotonic() + max(1, min(last_retry_after or 60, 3600))
                 elif "authentication" in str(exc).lower():
                     self._disabled_until_restart.add(provider)
             except Exception as exc:
                 last_error = exc
+                self._last_error_kind[provider] = "unavailable"
                 logger.warning(
                     "%s stream failed before its first text chunk: %s",
                     provider,
@@ -639,6 +668,14 @@ class LLMClient:
                         "ms": round((time.perf_counter() - attempt_started) * 1000),
                     }
                 )
+        kinds = [
+            self._last_error_kind.get(provider)
+            for provider in self.provider_order
+            if self._last_error_kind.get(provider)
+        ]
+        kind = "quota" if kinds and all(item == "quota" for item in kinds) else (
+            "auth" if kinds and all(item == "auth" for item in kinds) else "unavailable"
+        )
         raise ProviderUnavailableError(
-            "All configured LLM providers are unavailable."
+            "All configured LLM providers are unavailable.", kind, last_retry_after
         ) from last_error
