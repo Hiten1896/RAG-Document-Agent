@@ -386,10 +386,8 @@ class MindMapEndpointTests(unittest.TestCase):
         )
         llm = FakeLLM(
             [
-                "First group summary: the handbook describes procedures and rules. "
-                "It also covers responsibilities and safety practices.",
-                "Second group summary: the handbook describes departments and "
-                "resources. It also covers review and reporting processes.",
+                "The handbook describes procedures, rules, departments, resources, "
+                "responsibilities, safety, review, and reporting processes.",
                 map_json,
             ]
         )
@@ -432,7 +430,7 @@ class MindMapEndpointTests(unittest.TestCase):
         self.assertEqual(response.headers["x-debug"], "true")
         self.assertGreater(response.json()["debug"]["chunks_used"], 1)
         self.assertLessEqual(response.json()["debug"]["chunks_used"], 24)
-        self.assertEqual(len(llm.prompts), 3)
+        self.assertEqual(len(llm.prompts), 2)
         self.assertTrue(all(len(prompt) <= main.GROQ_MAX_CONTEXT_CHARS for prompt in llm.prompts))
         self.assertIn("Summarize each labeled location", llm.prompts[0])
         self.assertIn("Create a mind map", llm.prompts[-1])
