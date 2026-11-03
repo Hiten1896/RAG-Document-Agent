@@ -814,6 +814,9 @@ export default function Home() {
   const quizRequestIdRef = useRef(0);
   const mindMapRequestRef = useRef(false);
   const visualRequestRef = useRef(false);
+  const ingestionPromisesRef = useRef(new Map<string, Promise<void>>());
+  const ingestedFilesRef = useRef(ingestedFiles);
+  ingestedFilesRef.current = ingestedFiles;
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareData, setCompareData] = useState<CompareResponse | null>(null);
   const [compareLoading, setCompareLoading] = useState(false);
@@ -1350,13 +1353,30 @@ export default function Home() {
       const existing = ingestedFiles.find(
         (ef) => ef.name === f.name && ef.chatId === activeConversationId,
       );
-      return !existing || existing.status === 'failed';
+      return !existing || existing.status === 'failed' || existing.status === 'processing';
     });
 
     if (!newFiles.length) return;
 
     setSidebarOpen(false);
-    await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
+    await Promise.all(newFiles.map((f) => {
+      const key = JSON.stringify([activeConversationId, f.name]);
+      const promise = triggerAutoIngest(f);
+      ingestionPromisesRef.current.set(key, promise);
+      promise.then(
+        () => {
+          if (ingestionPromisesRef.current.get(key) === promise) {
+            ingestionPromisesRef.current.delete(key);
+          }
+        },
+        () => {
+          if (ingestionPromisesRef.current.get(key) === promise) {
+            ingestionPromisesRef.current.delete(key);
+          }
+        },
+      );
+      return promise;
+    }));
   }
 
   async function triggerAutoIngest(
@@ -1416,7 +1436,34 @@ export default function Home() {
      to re-pick it from disk. */
   const handleRetryIngest = (fileToRetry: IngestedFile) => {
     if (!fileToRetry.file) return;
-    triggerAutoIngest(fileToRetry.file, fileToRetry.chatId);
+    const key = JSON.stringify([fileToRetry.chatId, fileToRetry.name]);
+    const promise = triggerAutoIngest(fileToRetry.file, fileToRetry.chatId);
+    ingestionPromisesRef.current.set(key, promise);
+  };
+
+  const waitForDocuments = async (
+    targetConversationId: string,
+    fileNames: string[] = [],
+  ) => {
+    const names = fileNames.length
+      ? fileNames
+      : ingestedFilesRef.current
+          .filter(
+            (file) =>
+              file.chatId === targetConversationId && file.status === 'processing',
+          )
+          .map((file) => file.name);
+    await Promise.all(
+      names.map((name) =>
+        ingestionPromisesRef.current.get(
+          JSON.stringify([targetConversationId, name]),
+        ),
+      ),
+    );
+    return ingestedFilesRef.current.some(
+      (file) =>
+        file.chatId === targetConversationId && file.status === 'completed',
+    );
   };
 
   const handleGenerateMindMap = async (topic?: string, regenerate = false) => {
@@ -1663,6 +1710,18 @@ export default function Home() {
     if (e) e.preventDefault();
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
+    const userText = (displayQuery ?? requestedQuery).trim();
+    const targetConversationId = activeConversationId;
+    const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
+
+    if (!presetQuery) {
+      setQuery('');
+      setPendingAttachments([]);
+      setMessagesForActive((prev) => [
+        ...prev,
+        { sender: 'user' as const, text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
+      ]);
+    }
 
     // Preset prompts are already fully formed backend instructions. Re-running
     // intent detection on them would dispatch the same command recursively.
@@ -1679,35 +1738,35 @@ export default function Home() {
       }
     }
     if (action === 'mindmap') {
+      await waitForDocuments(targetConversationId, attachedFiles);
       await handleGenerateMindMap(
         classifiedTopic || promptTopic(requestedQuery, 'mindmap'),
       );
-      setQuery('');
       return;
     }
     if (action === 'chart') {
+      await waitForDocuments(targetConversationId, attachedFiles);
       await handleGenerateVisual(
         'chart',
         classifiedTopic || promptTopic(requestedQuery, 'chart'),
       );
-      setQuery('');
       return;
     }
     if (action === 'quiz') {
+      await waitForDocuments(targetConversationId, attachedFiles);
       handleOpenQuiz();
-      setQuery('');
       return;
     }
     if (action === 'compare') {
+      await waitForDocuments(targetConversationId, attachedFiles);
       handleOpenCompare();
-      if (pendingAttachments.length >= 2) {
+      if (attachedFiles && attachedFiles.length >= 2) {
         await handleCompareDocuments(
-          pendingAttachments[0],
-          pendingAttachments[1],
+          attachedFiles[0],
+          attachedFiles[1],
           requestedQuery,
         );
       }
-      setQuery('');
       return;
     }
     if (action && action in COMMAND_PROMPTS) {
@@ -1720,23 +1779,19 @@ export default function Home() {
       return;
     }
 
-    const userText = (displayQuery ?? requestedQuery).trim();
     const requestText = requestedQuery.trim();
-    const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
     // Captured before the async gap below — the active conversation could
     // change while this request is in flight, and the backend filters
     // retrieval on the chat id, so the answer must come from the vectors of
     // the conversation the message was actually sent in.
-    const targetConversationId = activeConversationId;
-    const answerIndex = messages.length + 1;
+    const answerIndex = messages.length + (presetQuery ? 0 : 1);
 
-    setQuery('');
-    setPendingAttachments([]);
+    if (presetQuery) {
+      setQuery('');
+      setPendingAttachments([]);
+    }
     setMessagesForActive((prev) => {
-      const next = [
-        ...prev,
-        { sender: 'user' as const, text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
-      ];
+      const next = [...prev];
       if (STREAMING_ENABLED) {
         next.push({
           sender: 'agent',
