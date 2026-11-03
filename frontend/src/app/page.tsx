@@ -814,7 +814,7 @@ export default function Home() {
   const quizRequestIdRef = useRef(0);
   const mindMapRequestRef = useRef(false);
   const visualRequestRef = useRef(false);
-  const ingestionPromisesRef = useRef(new Map<string, Promise<void>>());
+  const ingestionPromisesRef = useRef(new Map<string, Promise<boolean>>());
   const ingestedFilesRef = useRef(ingestedFiles);
   ingestedFilesRef.current = ingestedFiles;
   const [compareOpen, setCompareOpen] = useState(false);
@@ -1392,7 +1392,7 @@ export default function Home() {
   async function triggerAutoIngest(
     fileToIngest: File,
     targetChatId = activeConversationId,
-  ) {
+  ): Promise<boolean> {
     const name = fileToIngest.name;
 
     // Guards against a stale response overwriting a newer one for the same
@@ -1419,7 +1419,7 @@ export default function Home() {
       // "processing" until it hit the 60-attempt timeout and falsely reported
       // failure for documents that had actually been indexed correctly.
       const res = await ingestDocument(fileToIngest, targetChatId);
-      if (isStale()) return;
+      if (isStale()) return false;
 
       setIngestedFiles((prev) =>
         prev.map((f) =>
@@ -1428,8 +1428,9 @@ export default function Home() {
             : f
         )
       );
+      return true;
     } catch (err: unknown) {
-      if (isStale()) return;
+      if (isStale()) return false;
       const message = getErrorMessage(err, 'Failed to communicate with backend.');
       setIngestedFiles((prev) =>
         prev.map((f) =>
@@ -1438,6 +1439,7 @@ export default function Home() {
             : f,
         ),
       );
+      return false;
     }
   }
 
@@ -1463,14 +1465,14 @@ export default function Home() {
               file.chatId === targetConversationId && file.status === 'processing',
           )
           .map((file) => file.name);
-    await Promise.all(
+    const results = await Promise.all(
       names.map((name) =>
         ingestionPromisesRef.current.get(
           JSON.stringify([targetConversationId, name]),
         ),
       ),
     );
-    return ingestedFilesRef.current.some(
+    return results.some(Boolean) || ingestedFilesRef.current.some(
       (file) =>
         file.chatId === targetConversationId && file.status === 'completed',
     );
@@ -1740,7 +1742,7 @@ export default function Home() {
     if (!presetQuery) {
       try {
         const classified = await classifyIntent(requestedQuery, activeConversationId);
-        action = classified.action;
+        if (classified.action) action = classified.action;
         classifiedTopic = classified.topic;
       } catch {
         // Keep the local classifier as a deterministic fallback if the
@@ -1780,6 +1782,7 @@ export default function Home() {
       return;
     }
     if (action && action in COMMAND_PROMPTS) {
+      await waitForDocuments(targetConversationId, attachedFiles);
       await handleSendQuery(
         undefined,
         COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>],
@@ -1790,11 +1793,14 @@ export default function Home() {
     }
 
     const requestText = requestedQuery.trim();
+    await waitForDocuments(targetConversationId, attachedFiles);
     // Captured before the async gap below — the active conversation could
     // change while this request is in flight, and the backend filters
     // retrieval on the chat id, so the answer must come from the vectors of
     // the conversation the message was actually sent in.
-    const answerIndex = messages.length + (presetQuery ? 0 : 1);
+    // The original prompt is appended before command prompts are expanded, so
+    // the streamed assistant message is always the next entry.
+    const answerIndex = messages.length + 1;
 
     if (presetQuery) {
       setQuery('');
