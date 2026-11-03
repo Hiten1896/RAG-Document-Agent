@@ -164,13 +164,13 @@ interface SavedArtifact {
   createdAt: string;
 }
 
-type GeneratedArtifactKind = 'mindmap' | 'chart' | 'quiz' | 'compare' | 'answer';
+type GeneratedArtifactKind = 'mindmap' | 'chart' | 'quiz' | 'compare';
 
 interface GeneratedArtifact {
   id: string;
   title: string;
   kind: GeneratedArtifactKind;
-  data: MindMapResponse | VisualResponse | QuizResponse | CompareResponse | string;
+  data: MindMapResponse | VisualResponse | QuizResponse | CompareResponse;
   createdAt: string;
 }
 
@@ -184,20 +184,28 @@ function ArtifactPanel({
   onClose: () => void;
 }) {
   return (
-    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900" aria-label="Artifacts">
-      <header className="mb-4 flex shrink-0 items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
-        <div>
-          <h2 className="text-sm font-semibold">Artifacts</h2>
+    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white dark:border-slate-800/80 dark:bg-slate-900/95" aria-label="Artifacts">
+      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5 dark:border-slate-800/80">
+        <div className="min-w-0">
+          <h2 className="truncate text-sm font-medium text-slate-800 dark:text-slate-200">Artifacts</h2>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Reopen generated results</p>
         </div>
-        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="shrink-0 rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+          aria-label="Close artifacts"
+          title="Close"
+        >
+          <X className="h-4 w-4" />
+        </button>
       </header>
       {artifacts.length === 0 ? (
         <p className="text-sm text-slate-500 dark:text-slate-400">
           Generated mind maps, charts, quizzes, comparisons, and answers will appear here.
         </p>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2 p-4">
           {artifacts.map((artifact) => (
             <button
               key={artifact.id}
@@ -211,20 +219,6 @@ function ArtifactPanel({
           ))}
         </div>
       )}
-    </aside>
-  );
-}
-
-function TextResultPanel({ text, onClose }: { text: string; onClose: () => void }) {
-  return (
-    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900" aria-label="Generated result">
-      <header className="mb-4 flex shrink-0 items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
-        <h2 className="text-sm font-semibold">Generated result</h2>
-        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
-      </header>
-      <div className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-700 dark:text-slate-300">
-        {text || 'Preparing your result…'}
-      </div>
     </aside>
   );
 }
@@ -817,19 +811,20 @@ export default function Home() {
   const [viewerLocation, setViewerLocation] = useState<string | null>(null);
   const [viewerText, setViewerText] = useState<string | null>(null);
   const [visualStudioOpen, setVisualStudioOpen] = useState(false);
-  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare' | 'answer' | 'artifacts'>('visual');
+  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare' | 'artifacts'>('visual');
   const [, setArtifactsOpen] = useState(false);
   const [generatedArtifacts, setGeneratedArtifacts] = useState<GeneratedArtifact[]>(() => {
     if (typeof window === 'undefined') return [];
     try {
       const stored = window.localStorage.getItem('docagent_generated_artifacts');
       const parsed = stored ? JSON.parse(stored) : null;
-      return Array.isArray(parsed) ? parsed : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((artifact) => artifact?.kind !== 'answer')
+        : [];
     } catch {
       return [];
     }
   });
-  const [selectedArtifactText, setSelectedArtifactText] = useState<string | null>(null);
   const [visualStudioTab, setVisualStudioTab] = useState<VisualStudioTab>('mindmap');
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
@@ -911,9 +906,6 @@ export default function Home() {
       setCompareConversationId(activeConversationId);
       setCompareOpen(true);
       setSidePanelKind('compare');
-    } else {
-      setSidePanelKind('answer');
-      setSelectedArtifactText(artifact.data as string);
     }
   }, [activeConversationId, closeFileViewer]);
 
@@ -1707,7 +1699,11 @@ export default function Home() {
   };
 
   /* Query */
-  const handleSendQuery = async (e?: React.FormEvent, presetQuery?: string) => {
+  const handleSendQuery = async (
+    e?: React.FormEvent,
+    presetQuery?: string,
+    displayQuery?: string,
+  ) => {
     if (e) e.preventDefault();
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
@@ -1743,18 +1739,17 @@ export default function Home() {
       return;
     }
     if (action && action in COMMAND_PROMPTS) {
-      closeFileViewer();
-      setQuizOpen(false);
-      setCompareOpen(false);
-      setArtifactsOpen(false);
-      setSidePanelKind('answer');
-      setVisualStudioOpen(true);
-      await handleSendQuery(undefined, COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>]);
+      await handleSendQuery(
+        undefined,
+        COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>],
+        requestedQuery,
+      );
       setQuery('');
       return;
     }
 
-    const userText = requestedQuery.trim();
+    const userText = (displayQuery ?? requestedQuery).trim();
+    const requestText = requestedQuery.trim();
     const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
     // Captured before the async gap below — the active conversation could
     // change while this request is in flight, and the backend filters
@@ -1798,7 +1793,7 @@ export default function Home() {
 
       try {
         await streamQueryDocument(
-          userText,
+          requestText,
           targetConversationId,
           true,
           controller.signal,
@@ -1814,13 +1809,6 @@ export default function Home() {
                 text: message.text + event.data.text,
               }));
             } else if (event.event === 'done') {
-              if (presetQuery) {
-                saveGeneratedArtifact({
-                  title: requestedQuery.split('.')[0].slice(0, 60) || 'Generated answer',
-                  kind: 'answer',
-                  data: event.data.answer,
-                });
-              }
               updateStreamMessage((message) => ({
                 ...message,
                 text: event.data.answer,
@@ -1869,14 +1857,7 @@ export default function Home() {
     try {
       // No `source` filter is passed, so the backend searches across every
       // ingested document's chunks rather than restricting to one file.
-      const res = await queryDocument(userText, targetConversationId, 4, true);
-      if (presetQuery) {
-        saveGeneratedArtifact({
-          title: userText.split('.')[0].slice(0, 60) || 'Generated answer',
-          kind: 'answer',
-          data: res.answer || 'No answer returned.',
-        });
-      }
+      const res = await queryDocument(requestText, targetConversationId, 4, true);
       setMessagesForActive((prev) => [
         ...prev,
         {
@@ -2314,9 +2295,6 @@ export default function Home() {
   const hasIndexedDocuments = activeChatFiles.some(
     (file) => file.status === 'completed',
   );
-  const latestGeneratedAnswer =
-    [...messages].reverse().find((message) => message.sender === 'agent')?.text || '';
-
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
     // which one won depended on Tailwind's output order rather than intent.
@@ -3356,14 +3334,6 @@ export default function Home() {
               onOpen={openGeneratedArtifact}
               onClose={() => {
                 setArtifactsOpen(false);
-                setVisualStudioOpen(false);
-              }}
-            />
-          ) : sidePanelKind === 'answer' ? (
-            <TextResultPanel
-              text={selectedArtifactText ?? latestGeneratedAnswer}
-              onClose={() => {
-                setSelectedArtifactText(null);
                 setVisualStudioOpen(false);
               }}
             />
