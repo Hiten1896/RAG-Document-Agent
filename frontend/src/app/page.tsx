@@ -58,6 +58,7 @@ import {
   Copy,
   Check,
   Download,
+  Archive,
   BookmarkCheck,
   GitBranch,
 } from 'lucide-react';
@@ -161,6 +162,57 @@ interface SavedArtifact {
   title: string;
   text: string;
   createdAt: string;
+}
+
+type GeneratedArtifactKind = 'mindmap' | 'chart' | 'quiz' | 'compare' | 'answer';
+
+interface GeneratedArtifact {
+  id: string;
+  title: string;
+  kind: GeneratedArtifactKind;
+  data: MindMapResponse | VisualResponse | QuizResponse | CompareResponse | string;
+  createdAt: string;
+}
+
+function ArtifactPanel({
+  artifacts,
+  onOpen,
+  onClose,
+}: {
+  artifacts: GeneratedArtifact[];
+  onOpen: (artifact: GeneratedArtifact) => void;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900" aria-label="Artifacts">
+      <header className="mb-4 flex shrink-0 items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
+        <div>
+          <h2 className="text-sm font-semibold">Artifacts</h2>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Reopen generated results</p>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
+      </header>
+      {artifacts.length === 0 ? (
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Generated mind maps, charts, quizzes, comparisons, and answers will appear here.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {artifacts.map((artifact) => (
+            <button
+              key={artifact.id}
+              type="button"
+              onClick={() => onOpen(artifact)}
+              className="w-full rounded-xl border border-slate-200 px-3 py-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/60 dark:border-slate-700 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-950/30"
+            >
+              <span className="block text-sm font-medium text-slate-700 dark:text-slate-200">{artifact.title}</span>
+              <span className="mt-1 block text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">{artifact.kind}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </aside>
+  );
 }
 
 function TextResultPanel({ text, onClose }: { text: string; onClose: () => void }) {
@@ -765,7 +817,19 @@ export default function Home() {
   const [viewerLocation, setViewerLocation] = useState<string | null>(null);
   const [viewerText, setViewerText] = useState<string | null>(null);
   const [visualStudioOpen, setVisualStudioOpen] = useState(false);
-  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare' | 'answer'>('visual');
+  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare' | 'answer' | 'artifacts'>('visual');
+  const [, setArtifactsOpen] = useState(false);
+  const [generatedArtifacts, setGeneratedArtifacts] = useState<GeneratedArtifact[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const stored = window.localStorage.getItem('docagent_generated_artifacts');
+      const parsed = stored ? JSON.parse(stored) : null;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+  const [selectedArtifactText, setSelectedArtifactText] = useState<string | null>(null);
   const [visualStudioTab, setVisualStudioTab] = useState<VisualStudioTab>('mindmap');
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
@@ -792,6 +856,52 @@ export default function Home() {
   const [compareConversationId, setCompareConversationId] =
     useState(activeConversationId);
   const compareRequestIdRef = useRef(0);
+
+  const saveGeneratedArtifact = useCallback((artifact: Omit<GeneratedArtifact, 'id' | 'createdAt'>) => {
+    const nextArtifact: GeneratedArtifact = {
+      ...artifact,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      createdAt: new Date().toISOString(),
+    };
+    setGeneratedArtifacts((previous) => {
+      const next = [nextArtifact, ...previous].slice(0, 20);
+      try {
+        window.localStorage.setItem('docagent_generated_artifacts', JSON.stringify(next));
+      } catch {
+        // Generated results remain available for this session if storage is unavailable.
+      }
+      return next;
+    });
+  }, []);
+
+  const openGeneratedArtifact = useCallback((artifact: GeneratedArtifact) => {
+    setArtifactsOpen(false);
+    setVisualStudioOpen(true);
+    if (artifact.kind === 'mindmap') {
+      setMindMapData(artifact.data as MindMapResponse);
+      setMindMapConversationId(activeConversationId);
+      setSidePanelKind('visual');
+      setVisualStudioTab('mindmap');
+    } else if (artifact.kind === 'chart') {
+      setVisualCache({ chart: artifact.data as VisualResponse });
+      setVisualCacheConversationId(activeConversationId);
+      setSidePanelKind('visual');
+      setVisualStudioTab('chart');
+    } else if (artifact.kind === 'quiz') {
+      setQuizData(artifact.data as QuizResponse);
+      setQuizConversationId(activeConversationId);
+      setQuizOpen(true);
+      setSidePanelKind('quiz');
+    } else if (artifact.kind === 'compare') {
+      setCompareData(artifact.data as CompareResponse);
+      setCompareConversationId(activeConversationId);
+      setCompareOpen(true);
+      setSidePanelKind('compare');
+    } else {
+      setSidePanelKind('answer');
+      setSelectedArtifactText(artifact.data as string);
+    }
+  }, [activeConversationId]);
 
   const openFileViewer = useCallback(
     (fname: string, page?: number, location?: string, excerpt?: string) => {
@@ -1383,6 +1493,11 @@ export default function Home() {
       });
       if (activeConversationId === targetConversationId) {
         setMindMapData(result);
+        saveGeneratedArtifact({
+          title: result.title || 'Mind map',
+          kind: 'mindmap',
+          data: result,
+        });
       }
     } catch (err: unknown) {
       if (activeConversationId === targetConversationId) {
@@ -1423,6 +1538,11 @@ export default function Home() {
       const result = await generateVisual(kind, targetConversationId, topic);
       if (activeConversationId === targetConversationId) {
         setVisualCache((previous) => ({ ...previous, [kind]: result }));
+        saveGeneratedArtifact({
+          title: result.title || 'Chart',
+          kind: 'chart',
+          data: result,
+        });
       }
     } catch (err: unknown) {
       if (activeConversationId === targetConversationId) setVisualError(getErrorMessage(err, 'Could not generate the visual.'));
@@ -1476,6 +1596,11 @@ export default function Home() {
         activeConversationId === targetConversationId
       ) {
         setQuizData(result);
+        saveGeneratedArtifact({
+          title: `Quiz (${result.questions.length} questions)`,
+          kind: 'quiz',
+          data: result,
+        });
         setQuizPanelVersion((version) => version + 1);
       }
     } catch (err: unknown) {
@@ -1531,6 +1656,11 @@ export default function Home() {
         activeConversationId === targetConversationId
       ) {
         setCompareData(result);
+        saveGeneratedArtifact({
+          title: `Compare: ${result.files[0]} vs ${result.files[1]}`,
+          kind: 'compare',
+          data: result,
+        });
       }
     } catch (err: unknown) {
       if (
@@ -1659,6 +1789,13 @@ export default function Home() {
                 text: message.text + event.data.text,
               }));
             } else if (event.event === 'done') {
+              if (presetQuery) {
+                saveGeneratedArtifact({
+                  title: requestedQuery.split('.')[0].slice(0, 60) || 'Generated answer',
+                  kind: 'answer',
+                  data: event.data.answer,
+                });
+              }
               updateStreamMessage((message) => ({
                 ...message,
                 text: event.data.answer,
@@ -1708,6 +1845,13 @@ export default function Home() {
       // No `source` filter is passed, so the backend searches across every
       // ingested document's chunks rather than restricting to one file.
       const res = await queryDocument(userText, targetConversationId, 4, true);
+      if (presetQuery) {
+        saveGeneratedArtifact({
+          title: userText.split('.')[0].slice(0, 60) || 'Generated answer',
+          kind: 'answer',
+          data: res.answer || 'No answer returned.',
+        });
+      }
       setMessagesForActive((prev) => [
         ...prev,
         {
@@ -2230,6 +2374,25 @@ export default function Home() {
             {/* Collapse — desktop only; mobile uses the X below via the
                 overlay drawer instead. Same base style as the theme toggle
                 above so both read at equal visual weight. */}
+            <button
+              type="button"
+              onClick={() => {
+                setArtifactsOpen(true);
+                setVisualStudioOpen(true);
+                setSidePanelKind('artifacts');
+              }}
+              className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer relative"
+              aria-label="Open artifacts"
+              title="Open artifacts"
+            >
+              <Archive className="w-4 h-4" />
+              {generatedArtifacts.length > 0 && (
+                <span className="absolute -right-0.5 -top-0.5 min-w-3.5 rounded-full bg-indigo-600 px-1 text-[9px] leading-3.5 text-white">
+                  {generatedArtifacts.length > 9 ? '9+' : generatedArtifacts.length}
+                </span>
+              )}
+            </button>
+
             <button
               type="button"
               onClick={() => setDesktopSidebarOpen(false)}
@@ -3159,10 +3322,22 @@ export default function Home() {
           >
             <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
           </div>
-          {sidePanelKind === 'answer' ? (
+          {sidePanelKind === 'artifacts' ? (
+            <ArtifactPanel
+              artifacts={generatedArtifacts}
+              onOpen={openGeneratedArtifact}
+              onClose={() => {
+                setArtifactsOpen(false);
+                setVisualStudioOpen(false);
+              }}
+            />
+          ) : sidePanelKind === 'answer' ? (
             <TextResultPanel
-              text={latestGeneratedAnswer}
-              onClose={() => setVisualStudioOpen(false)}
+              text={selectedArtifactText ?? latestGeneratedAnswer}
+              onClose={() => {
+                setSelectedArtifactText(null);
+                setVisualStudioOpen(false);
+              }}
             />
           ) : sidePanelKind === 'visual' ? (
             <VisualPanel
