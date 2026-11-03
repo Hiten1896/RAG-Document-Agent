@@ -434,6 +434,26 @@ class QueryRequest(BaseModel):
     top_k: Optional[int] = None
 
 
+class IntentRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=2000)
+
+
+class IntentResponse(BaseModel):
+    action: Optional[
+        Literal[
+            "mindmap",
+            "chart",
+            "quiz",
+            "compare",
+            "summary",
+            "action_items",
+            "risks",
+            "terms",
+        ]
+    ] = None
+    topic: str = ""
+
+
 class MindMapRequest(BaseModel):
     topic: Optional[str] = Field(default=None, max_length=300)
     file_name: Optional[str] = Field(default=None, max_length=255)
@@ -713,6 +733,31 @@ def _open_llm_stream(client: Any, prompt: str, groq_prompt: Optional[str], featu
         if "argument" not in str(exc) and "positional" not in str(exc):
             raise
         return client.open_stream(prompt, groq_prompt)
+
+
+INTENT_PROMPT = """Classify the user's request for a document assistant.
+Return JSON only with this exact shape: {"action": null, "topic": ""}.
+action must be one of mindmap, chart, quiz, compare, summary, action_items,
+risks, terms, or null when the user is asking a normal document question.
+Understand natural language, misspellings, implied requests such as "compare
+these two", and phrases like "give me the key takeaways". Use topic for the
+subject requested by a mindmap or chart, otherwise use an empty string.
+Do not answer the user's question and do not invent an action.
+
+User request:
+"""
+
+
+def _classify_intent(prompt: str) -> IntentResponse:
+    client = get_llm_client()
+    result = _invoke_llm(
+        client,
+        INTENT_PROMPT + prompt.strip(),
+        None,
+        "intent",
+    )
+    parsed = json.loads(strip_json_wrappers(message_to_text(result.response)))
+    return IntentResponse.model_validate(parsed)
 
 
 async def generate_json(
@@ -1066,6 +1111,18 @@ async def ingest_document(
         "pages": len(units),
         "message": f"Indexed {len(texts)} chunks from {filename}.",
     }
+
+
+@app.post("/api/intent", response_model=IntentResponse)
+async def classify_intent(payload: IntentRequest) -> IntentResponse:
+    try:
+        return await asyncio.to_thread(_classify_intent, payload.prompt)
+    except (json.JSONDecodeError, ValidationError, ProviderUnavailableError) as exc:
+        logger.info("Intent classification unavailable: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Intent classification is temporarily unavailable.",
+        ) from exc
 
 
 @app.post("/api/query")

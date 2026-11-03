@@ -14,6 +14,8 @@ import {
   generateVisual,
   generateQuiz,
   compareDocuments,
+  classifyIntent,
+  PromptAction,
   clearSession,
   SourceMetadata,
   QueryDebug,
@@ -224,16 +226,6 @@ function ArtifactPanel({
 }
 
 type ExportFormat = 'pdf' | 'docx';
-
-type PromptAction =
-  | 'mindmap'
-  | 'chart'
-  | 'quiz'
-  | 'compare'
-  | 'summary'
-  | 'action_items'
-  | 'risks'
-  | 'terms';
 
 function normalizePrompt(value: string): string {
   return value
@@ -1710,14 +1702,30 @@ export default function Home() {
 
     // Preset prompts are already fully formed backend instructions. Re-running
     // intent detection on them would dispatch the same command recursively.
-    const action = presetQuery ? null : promptAction(requestedQuery);
+    let action: PromptAction | null = presetQuery ? null : promptAction(requestedQuery);
+    let classifiedTopic = '';
+    if (!presetQuery) {
+      try {
+        const classified = await classifyIntent(requestedQuery, activeConversationId);
+        action = classified.action;
+        classifiedTopic = classified.topic;
+      } catch {
+        // Keep the local classifier as a deterministic fallback if the
+        // optional intent call is unavailable or rate-limited.
+      }
+    }
     if (action === 'mindmap') {
-      await handleGenerateMindMap(promptTopic(requestedQuery, 'mindmap'));
+      await handleGenerateMindMap(
+        classifiedTopic || promptTopic(requestedQuery, 'mindmap'),
+      );
       setQuery('');
       return;
     }
     if (action === 'chart') {
-      await handleGenerateVisual('chart', promptTopic(requestedQuery, 'chart'));
+      await handleGenerateVisual(
+        'chart',
+        classifiedTopic || promptTopic(requestedQuery, 'chart'),
+      );
       setQuery('');
       return;
     }

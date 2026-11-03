@@ -18,6 +18,21 @@ export interface IngestResponse {
   pages?: number;
 }
 
+export type PromptAction =
+  | 'mindmap'
+  | 'chart'
+  | 'quiz'
+  | 'compare'
+  | 'summary'
+  | 'action_items'
+  | 'risks'
+  | 'terms';
+
+export interface IntentResponse {
+  action: PromptAction | null;
+  topic: string;
+}
+
 export interface QueryResponse {
   // The backend echoes the question back, but treat it as optional so a
   // response without it doesn't read as a contract violation.
@@ -528,6 +543,21 @@ export async function queryDocument(
           }
         : undefined,
   };
+}
+
+export async function classifyIntent(prompt: string, chatId?: string): Promise<IntentResponse> {
+  const response = await fetch(`${API_BASE_URL}${API_PREFIX}/intent`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...sessionHeaders(chatId),
+    },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!response.ok) {
+    throw new Error('Intent classification is temporarily unavailable.');
+  }
+  return response.json() as Promise<IntentResponse>;
 }
 
 export async function streamQueryDocument(
