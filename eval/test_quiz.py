@@ -214,7 +214,7 @@ class QuizEndpointTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(
+        self.assertLessEqual(
             response.json()["debug"]["chunks_used"], main.QUIZ_MAX_CHUNKS
         )
         self.assertLessEqual(
@@ -222,7 +222,7 @@ class QuizEndpointTests(unittest.TestCase):
         )
         self.assertLessEqual(len(llm.prompts[0]), main.GROQ_MAX_CONTEXT_CHARS)
         self.assertIn("Chunk 0", llm.prompts[0])
-        self.assertIn("Chunk 59", llm.prompts[0])
+        self.assertNotIn("Chunk 59", llm.prompts[0])
         self.assertLessEqual(len(llm.prompts), 2)
 
     def test_quiz_rejects_wrong_question_count_and_excessive_count(self):

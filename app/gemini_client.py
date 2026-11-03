@@ -57,11 +57,13 @@ class GeminiExhaustedError(RuntimeError):
         kind: str,
         last_error: Optional[Exception] = None,
         attempts: Optional[List[Dict[str, Any]]] = None,
+        retry_after: Optional[float] = None,
     ):
         super().__init__(message)
         self.kind = kind
         self.last_error = last_error
         self.attempts = attempts or []
+        self.retry_after = retry_after
 
 
 class ProviderUnavailableError(RuntimeError):
@@ -284,6 +286,7 @@ class GeminiClient:
             kind=last_kind,
             last_error=last_error,
             attempts=attempts,
+            retry_after=60 if last_kind == "quota" else None,
         )
 
     def open_stream(self, prompt: str, feature: str = "query") -> LLMStreamResult:
@@ -365,6 +368,7 @@ class GeminiClient:
             kind=last_kind,
             last_error=last_error,
             attempts=attempts,
+            retry_after=60 if last_kind == "quota" else None,
         )
 
 
@@ -625,7 +629,9 @@ class LLMClient:
                 attempts.extend(exc.attempts)
                 self._last_error_kind[provider] = exc.kind
                 if exc.kind == "quota":
-                    self._disabled_until[provider] = time.monotonic() + 90
+                    retry_after = exc.retry_after or 60
+                    last_retry_after = retry_after
+                    self._disabled_until[provider] = time.monotonic() + retry_after
                 elif exc.kind == "auth":
                     self._disabled_until_restart.add(provider)
                 elif exc.kind == "unknown":
@@ -720,7 +726,9 @@ class LLMClient:
                 attempts.extend(exc.attempts)
                 self._last_error_kind[provider] = exc.kind
                 if exc.kind == "quota":
-                    self._disabled_until[provider] = time.monotonic() + 600
+                    retry_after = exc.retry_after or 60
+                    last_retry_after = retry_after
+                    self._disabled_until[provider] = time.monotonic() + retry_after
                 elif exc.kind == "auth":
                     self._disabled_until_restart.add(provider)
             except (ProviderUnavailableError, requests.RequestException) as exc:
