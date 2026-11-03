@@ -1025,6 +1025,7 @@ export default function Home() {
      dragging a native panel shut) instead of getting stuck at a floor. */
   const MIN_VIEWER_WIDTH = 360;
   const MAX_VIEWER_WIDTH = 560;
+  const COLLAPSED_SIDEBAR_EXTRA_WIDTH = 80;
   const [viewerWidth, setViewerWidth] = useState(440);
   const viewerResizingRef = useRef(false);
 
@@ -1041,8 +1042,11 @@ export default function Home() {
       // Panel is on the right edge of the window, so its width is the
       // distance from the cursor to the right edge of the viewport.
       const next = window.innerWidth - e.clientX;
+      const requestedWidth = desktopSidebarOpen
+        ? next
+        : next - COLLAPSED_SIDEBAR_EXTRA_WIDTH;
       const clamped = Math.min(
-        Math.max(next, MIN_VIEWER_WIDTH),
+        Math.max(requestedWidth, MIN_VIEWER_WIDTH),
         Math.min(MAX_VIEWER_WIDTH, Math.round(window.innerWidth * 0.48)),
       );
       setViewerWidth(clamped);
@@ -1054,14 +1058,20 @@ export default function Home() {
       document.body.style.userSelect = '';
 
       const next = window.innerWidth - e.clientX;
-      if (next < MIN_VIEWER_WIDTH && !visualStudioOpen) {
+      const requestedWidth = desktopSidebarOpen
+        ? next
+        : next - COLLAPSED_SIDEBAR_EXTRA_WIDTH;
+      if (requestedWidth < MIN_VIEWER_WIDTH && !visualStudioOpen) {
         // Dragged shut — close the panel and reset to the default width so
         // the next open isn't stuck at whatever tiny size it was dragged to.
         closeFileViewer();
         setViewerWidth(440);
       } else {
+        const requestedWidth = desktopSidebarOpen
+          ? next
+          : next - COLLAPSED_SIDEBAR_EXTRA_WIDTH;
         setViewerWidth(Math.min(
-          Math.max(next, MIN_VIEWER_WIDTH),
+          Math.max(requestedWidth, MIN_VIEWER_WIDTH),
           Math.min(MAX_VIEWER_WIDTH, Math.round(window.innerWidth * 0.48)),
         ));
       }
@@ -1072,7 +1082,7 @@ export default function Home() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [closeFileViewer, visualStudioOpen]);
+  }, [closeFileViewer, desktopSidebarOpen, visualStudioOpen]);
 
   /* Theme state */
   const theme = useSyncExternalStore(
@@ -2246,7 +2256,10 @@ export default function Home() {
   );
   const sidePanelWidth = desktopSidebarOpen
     ? viewerWidth
-    : Math.min(viewerWidth + 80, MAX_VIEWER_WIDTH);
+    : Math.min(
+        viewerWidth + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
+        MAX_VIEWER_WIDTH + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
+      );
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
     // which one won depended on Tailwind's output order rather than intent.
@@ -3087,8 +3100,8 @@ export default function Home() {
       {/* ═══════════ FILE VIEWER PANEL ═══════════ */}
       {viewerFile && !visualStudioOpen && (
         <aside
-          className="hidden md:flex flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
-          style={{ width: sidePanelWidth, flexBasis: sidePanelWidth }}
+          className="hidden md:flex min-w-0 flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
+          style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}
         >
           {/* Drag handle — grabbing the left edge resizes the panel, same
               interaction as Claude's own side panel. A slightly wider
@@ -3168,7 +3181,7 @@ export default function Home() {
       )}
 
       {visualStudioOpen && (
-        <aside className="hidden md:flex w-full shrink-0 relative" style={{ width: sidePanelWidth, flexBasis: sidePanelWidth }}>
+        <aside className="hidden md:flex min-w-0 shrink-0 relative" style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}>
           <div
             onMouseDown={startViewerResize}
             className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
