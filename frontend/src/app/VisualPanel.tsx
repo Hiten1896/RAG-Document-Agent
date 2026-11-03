@@ -58,7 +58,7 @@ export default function VisualPanel({ tab, visualData, visualLoading, visualErro
       {tab !== 'mindmap' && !loading && !error && data && <ChartView data={data as VisualChart} />}
   </>;
   return embedded ? (
-    <aside className="flex h-full min-h-0 flex-col overflow-hidden border-l border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900" aria-label="Artifacts">
+    <aside className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden border-l border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900" aria-label="Artifacts">
       <header className="mb-2 flex shrink-0 items-center justify-between border-b border-slate-200 pb-2 dark:border-slate-800">
         <h2 className="text-sm font-semibold">Artifacts</h2>
         <button

@@ -2190,6 +2190,9 @@ export default function Home() {
   const activeGeneratedArtifacts = generatedArtifacts.filter(
     (artifact) => artifact.conversationId === activeConversationId,
   );
+  const sidePanelWidth = desktopSidebarOpen
+    ? viewerWidth
+    : Math.min(viewerWidth + 80, MAX_VIEWER_WIDTH);
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
     // which one won depended on Tailwind's output order rather than intent.
@@ -3031,7 +3034,7 @@ export default function Home() {
       {viewerFile && !visualStudioOpen && (
         <aside
           className="hidden md:flex flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
-          style={{ width: viewerWidth }}
+          style={{ width: sidePanelWidth, flexBasis: sidePanelWidth }}
         >
           {/* Drag handle — grabbing the left edge resizes the panel, same
               interaction as Claude's own side panel. A slightly wider
@@ -3111,7 +3114,7 @@ export default function Home() {
       )}
 
       {visualStudioOpen && (
-        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
+        <aside className="hidden md:flex w-full shrink-0 relative" style={{ width: sidePanelWidth, flexBasis: sidePanelWidth }}>
           <div
             onMouseDown={startViewerResize}
             className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
