@@ -57,18 +57,9 @@ import {
   RefreshCw,
   Copy,
   Check,
-  ClipboardList,
-  ShieldAlert,
-  ListChecks,
-  GitCompareArrows,
-  BookOpen,
-  CalendarDays,
   Download,
   BookmarkCheck,
   GitBranch,
-  Network,
-  BarChart3,
-  CircleHelp,
 } from 'lucide-react';
 import type { VisualStudioTab } from './VisualPanel';
 
@@ -280,95 +271,6 @@ const SUPPORTED_UPLOAD_ACCEPT = [
   'application/pdf',
   ...SUPPORTED_UPLOAD_EXTENSIONS,
 ].join(',');
-
-const ANALYSIS_PRESETS = [
-  {
-    label: 'Executive summary',
-    hint: 'The main ideas and conclusions',
-    prompt:
-      'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
-    icon: ClipboardList,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-    isVisual: undefined,
-  },
-  {
-    label: 'Visualize',
-    hint: 'Mind maps and charts',
-    prompt: '',
-    icon: Network,
-    isMindMap: true,
-  },
-  {
-    label: 'Chart',
-    hint: 'Plot document numbers',
-    prompt: '',
-    icon: BarChart3,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-    isVisual: 'chart' as VisualKind,
-  },
-  {
-    label: 'Quiz me',
-    hint: 'Practice with document facts',
-    prompt: '',
-    icon: CircleHelp,
-    isMindMap: false,
-    isQuiz: true,
-    isCompare: false,
-  },
-  {
-    label: 'Key risks',
-    hint: 'Issues, caveats, and exposure',
-    prompt:
-      'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
-    icon: ShieldAlert,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-  },
-  {
-    label: 'Action items',
-    hint: 'Tasks, owners, and deadlines',
-    prompt:
-      'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
-    icon: ListChecks,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-  },
-  {
-    label: 'Compare documents',
-    hint: 'Agreements and differences',
-    prompt: '',
-    icon: GitCompareArrows,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: true,
-  },
-  {
-    label: 'Key terms',
-    hint: 'Define important concepts',
-    prompt:
-      'Create a concise glossary of important terms and concepts from the uploaded documents. Explain each in plain language and cite the supporting page or location.',
-    icon: BookOpen,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-  },
-  {
-    label: 'Timeline',
-    hint: 'Important dates and events',
-    prompt:
-      'Build a chronological timeline of the important dates and events stated in the uploaded documents. Include the event and its supporting page or location, and do not infer dates.',
-    icon: CalendarDays,
-    isMindMap: false,
-    isQuiz: false,
-    isCompare: false,
-  },
-];
 
 const GREETINGS: Record<
   'morning' | 'afternoon' | 'evening' | 'night',
@@ -776,8 +678,6 @@ export default function Home() {
   const [compareConversationId, setCompareConversationId] =
     useState(activeConversationId);
   const compareRequestIdRef = useRef(0);
-  const [visibleAnalysisPresets, setVisibleAnalysisPresets] = useState(() => ANALYSIS_PRESETS.filter((preset) => ['Quiz me', 'Action items', 'Compare documents', 'Visualize'].includes(preset.label)));
-  const [suggestionNotice, setSuggestionNotice] = useState<string | null>(null);
 
   const openFileViewer = useCallback(
     (fname: string, page?: number, location?: string, excerpt?: string) => {
@@ -883,23 +783,6 @@ export default function Home() {
       const pick = pool[nextIndex];
       setGreeting(pick.headline);
       setGreetingSubtext(pick.subtext);
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, []);
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const nextPresets = ANALYSIS_PRESETS.filter((preset) => ['Quiz me', 'Action items', 'Compare documents', 'Visualize'].includes(preset.label));
-      setVisibleAnalysisPresets(nextPresets);
-
-      try {
-        window.localStorage.setItem(
-          'docagent_analysis_presets',
-          JSON.stringify(nextPresets.map((preset) => preset.label))
-        );
-      } catch {
-        // A reload is still randomized even without localStorage.
-      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);
@@ -1436,23 +1319,6 @@ export default function Home() {
     }
   };
 
-  const handleOpenQuiz = () => {
-    if (
-      !ingestedFiles.some(
-        (file) =>
-          file.chatId === activeConversationId && file.status === 'completed',
-      )
-    ) {
-      setSuggestionNotice('Upload a document first, then tap “Quiz me” to practice its facts.');
-      return;
-    }
-
-    setSuggestionNotice(null);
-    setQuizConversationId(activeConversationId);
-    setQuizError(null);
-    setQuizOpen(true);
-  };
-
   const handleGenerateQuiz = async (
     count: number,
     difficulty: QuizDifficulty,
@@ -1491,13 +1357,6 @@ export default function Home() {
     quizRequestIdRef.current += 1;
     setQuizOpen(false);
     setQuizLoading(false);
-  };
-
-  const handleOpenCompare = () => {
-    setSuggestionNotice(null);
-    setCompareConversationId(activeConversationId);
-    setCompareError(null);
-    setCompareOpen(true);
   };
 
   const handleCompareDocuments = async (
@@ -1547,42 +1406,20 @@ export default function Home() {
     setCompareLoading(false);
   };
 
-  const handleAnalysisPreset = (preset: (typeof ANALYSIS_PRESETS)[number]) => {
-    if (
-      !ingestedFiles.some(
-        (file) =>
-          file.chatId === activeConversationId && file.status === 'completed',
-      )
-    ) {
-      setSuggestionNotice(
-        `Upload a document first, then tap “${preset.label}” to run this analysis.`
-      );
-      return;
-    }
-
-    setSuggestionNotice(null);
-    if (preset.isQuiz) {
-      handleOpenQuiz();
-      return;
-    }
-    if (preset.isCompare) {
-      handleOpenCompare();
-      return;
-    }
-    if (preset.isMindMap) {
-      void handleGenerateMindMap();
-    } else if (preset.isVisual) {
-      void handleGenerateVisual(preset.isVisual);
-    } else {
-      void handleSendQuery(undefined, preset.prompt);
-    }
-  };
-
   /* Query */
   const handleSendQuery = async (e?: React.FormEvent, presetQuery?: string) => {
     if (e) e.preventDefault();
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
+
+    const mindMapMatch = requestedQuery.trim().match(
+      /^(?:make|create|show|generate|build)\s+(?:a\s+)?mind\s*map\b\s*(.*)$/i,
+    );
+    if (mindMapMatch) {
+      await handleGenerateMindMap(mindMapMatch[1]);
+      setQuery('');
+      return;
+    }
 
     const visualMatch = requestedQuery.trim().match(/^(?:draw|show|make|create)\s+(?:a\s+)?chart\b\s*(.*)$/i);
     if (visualMatch) {
@@ -2468,38 +2305,6 @@ export default function Home() {
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
                 {greetingSubtext}
               </p>
-              <div className="w-full max-w-2xl px-4 mb-4 text-left">
-                <div className="flex items-center justify-between mb-2 px-1">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-600 dark:text-slate-400">
-                    Start with an analysis
-                  </span>
-                  {!hasIndexedDocuments && (
-                    <span className="text-[11px] text-slate-600 dark:text-slate-400">Choose an analysis to get started</span>
-                  )}
-                </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {visibleAnalysisPresets.map((preset) => {
-                    const Icon = preset.icon;
-                    return (
-                      <button
-                        key={preset.label}
-                        type="button"
-                        onClick={() => handleAnalysisPreset(preset)}
-                        className="min-h-[64px] rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-2 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                      >
-                        <Icon className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 mb-1" />
-                        <span className="block text-[11px] font-semibold text-slate-900 dark:text-slate-100 leading-tight">{preset.label}</span>
-                        <span className="mt-0.5 block text-[9px] leading-snug text-slate-600 dark:text-slate-400">{preset.hint}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                {suggestionNotice && (
-                  <p role="status" aria-live="polite" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-                    {suggestionNotice}
-                  </p>
-                )}
-              </div>
               <div className="w-full max-w-2xl px-4">
                 <ChatComposer
                   query={query}
