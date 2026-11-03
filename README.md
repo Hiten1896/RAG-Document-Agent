@@ -54,9 +54,11 @@ LLM_PROVIDER_ORDER=gemini,groq
 The router uses temperature `0.2`, no tools, and no search grounding. A provider
 that returns a quota/rate-limit response is placed behind a short in-memory
 circuit breaker (60–120 seconds, honoring `Retry-After`); transient 503s and
-timeouts do not block it. Authentication failures are skipped until restart. Groq model
-selection uses `GROQ_MODEL`, or discovers a general-purpose chat model when it is
-unset.
+timeouts do not block it. Authentication failures are skipped until restart.
+Gemini uses `GEMINI_MODEL` and tries `GEMINI_FALLBACK_MODEL` when the primary
+model is not found. Groq uses `GROQ_MODEL`, defaulting to
+`llama-3.1-8b-instant`. The process-local request limits default to
+`GEMINI_RPM=8` and `GROQ_RPM=20`; set each slightly below your AI Studio limit.
 
 ## Environment variables
 
@@ -64,9 +66,13 @@ Set these in a local `.env` file; never commit that file:
 
 ```env
 GOOGLE_API_KEY=
+GEMINI_MODEL=gemini-3.8-flash
+GEMINI_FALLBACK_MODEL=gemini-3.5-flash-lite
+GEMINI_RPM=8
 JINA_API_KEY=
 GROQ_API_KEY=
-GROQ_MODEL=
+GROQ_MODEL=llama-3.1-8b-instant
+GROQ_RPM=20
 LLM_PROVIDER_ORDER=gemini,groq
 GROQ_MAX_CONTEXT_CHARS=12000
 PROMPT_VERSION=strict

@@ -970,7 +970,21 @@ def llm_status() -> Dict[str, Any]:
         }
         return {
             "providers": {
-                name: {"configured": value, "blocked_until": None, "last_error_kind": "configuration" if not value else "unknown"}
+                name: {
+                    "configured": value,
+                    "configured_model": os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+                    if name == "gemini"
+                    else os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+                    "fallback_model": os.getenv(
+                        "GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite"
+                    )
+                    if name == "gemini"
+                    else None,
+                    "blocked_until": None,
+                    "last_error_kind": "configuration" if not value else "unknown",
+                    "calls_last_60s": 0,
+                    "calls_last_60s_by_feature": {},
+                }
                 for name, value in configured.items()
             },
             "error": str(exc.detail),

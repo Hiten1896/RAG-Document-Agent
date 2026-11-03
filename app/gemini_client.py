@@ -119,15 +119,11 @@ def _load_api_keys() -> List[str]:
     return keys
 
 
-def _load_models() -> List[str]:
-    models: List[str] = []
-    single = os.getenv("LLM_MODEL")
-    if single:
-        models.append(single)
-    for model in _parse_csv_env(os.getenv("LLM_MODELS")):
-        if model not in models:
-            models.append(model)
-    return models or ["gemini-3.8-flash", "gemini-flash-latest"]
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+GEMINI_FALLBACK_MODEL = os.getenv(
+    "GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite"
+).strip()
+GROQ_DEFAULT_MODEL = "llama-3.1-8b-instant"
 
 
 def _retry_after(response: requests.Response) -> Optional[float]:
@@ -139,7 +135,15 @@ def _retry_after(response: requests.Response) -> Optional[float]:
 
 
 class GeminiClient:
-    _TRANSIENT_MARKERS = ("timeout", "timed out", "503", "unavailable", "connection")
+    _TRANSIENT_MARKERS = (
+        "timeout",
+        "timed out",
+        "503",
+        "504",
+        "gateway timeout",
+        "unavailable",
+        "connection",
+    )
     _QUOTA_MARKERS = ("quota", "rate limit", "429", "resource_exhausted")
     _AUTH_MARKERS = ("api key", "unauthenticated", "permission", "invalid_argument", "403")
     _MODEL_MARKERS = ("not_found", "no longer available", "404")
@@ -152,7 +156,13 @@ class GeminiClient:
         max_output_tokens: int = 1024,
     ):
         self.api_keys = api_keys if api_keys is not None else _load_api_keys()
-        self.models = models if models is not None else _load_models()
+        self.models = list(dict.fromkeys(models or [GEMINI_MODEL]))
+        self.model = self.models[0]
+        self.fallback_model = (
+            GEMINI_FALLBACK_MODEL
+            if GEMINI_FALLBACK_MODEL not in self.models
+            else ""
+        )
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         if not self.api_keys:
@@ -161,6 +171,35 @@ class GeminiClient:
             )
         self._current_key_index = 0
         self._clients: Dict[Tuple[str, str], ChatGoogleGenerativeAI] = {}
+        self._check_models()
+
+    def _check_models(self) -> None:
+        try:
+            response = requests.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": self.api_keys[0], "pageSize": 1000},
+                timeout=15,
+            )
+            response.raise_for_status()
+            available = {
+                str(item.get("name", "")).removeprefix("models/")
+                for item in response.json().get("models", [])
+            }
+            configured = [model for model in self.models + [self.fallback_model] if model]
+            missing = [model for model in configured if model not in available]
+            if missing:
+                flash_models = sorted(
+                    model for model in available
+                    if "flash" in model.lower() or "flash-lite" in model.lower()
+                )
+                logger.warning(
+                    "Configured Gemini model(s) not found: %s. Available flash/flash-lite "
+                    "models: %s",
+                    ", ".join(missing),
+                    ", ".join(flash_models) or "(none reported)",
+                )
+        except requests.RequestException as exc:
+            logger.warning("Could not check Gemini models at startup: %s", type(exc).__name__)
 
     @staticmethod
     def _classify(message: str) -> str:
@@ -195,12 +234,20 @@ class GeminiClient:
         last_error: Optional[Exception] = None
         attempts: List[Dict[str, str]] = []
         start_key_index = self._current_key_index
-        for model in self.models[:1]:
+        for model in self.models + ([self.fallback_model] if self.fallback_model else []):
             for offset in range(min(1, len(self.api_keys))):
                 key_index = (start_key_index + offset) % len(self.api_keys)
                 started = time.perf_counter()
                 try:
                     response = self._client_for(model, self.api_keys[key_index]).invoke(prompt)
+                    logger.info(
+                        "llm_call feature=%s provider=gemini model=%s attempt=%s "
+                        "prompt_chars=%s status=200",
+                        feature,
+                        model,
+                        len(attempts) + 1,
+                        len(prompt),
+                    )
                     attempts.append(
                         {
                             "provider": "gemini",
@@ -223,8 +270,15 @@ class GeminiClient:
                             "ms": round((time.perf_counter() - started) * 1000),
                         }
                     )
-                    # A model/key gets one call per request; routing decides fallback.
-                    continue
+                    if last_kind != "model_not_found":
+                        raise GeminiExhaustedError(
+                            "Gemini request failed.",
+                            kind=last_kind,
+                            last_error=last_error,
+                            attempts=attempts,
+                        )
+                    if model == self.fallback_model:
+                        break
         raise GeminiExhaustedError(
             "All Gemini models/keys exhausted.",
             kind=last_kind,
@@ -237,7 +291,7 @@ class GeminiClient:
         last_error: Optional[Exception] = None
         attempts: List[Dict[str, Any]] = []
         start_key_index = self._current_key_index
-        for model in self.models[:1]:
+        for model in self.models + ([self.fallback_model] if self.fallback_model else []):
             for offset in range(min(1, len(self.api_keys))):
                 key_index = (start_key_index + offset) % len(self.api_keys)
                 started = time.perf_counter()
@@ -265,6 +319,15 @@ class GeminiClient:
                             "ms": round((time.perf_counter() - started) * 1000),
                         }
                     )
+                    if last_kind != "model_not_found":
+                        raise GeminiExhaustedError(
+                            "Gemini stream request failed.",
+                            kind=last_kind,
+                            last_error=last_error,
+                            attempts=attempts,
+                        )
+                    if model == self.fallback_model:
+                        break
 
                     def remaining_chunks(
                         stream_iterator: Iterator[Any] = iterator,
@@ -312,12 +375,14 @@ class GroqClient:
         self.api_key = api_key
         self.temperature = temperature
         self._session = requests.Session()
-        self.model = model or self._discover_model()
+        self.model = model or GROQ_DEFAULT_MODEL
+        self.fallback_model = None
+        self._check_model()
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-    def _discover_model(self) -> str:
+    def _models(self) -> List[str]:
         response = self._session.get(
             f"{self.base_url}/models",
             headers=self._headers(),
@@ -328,7 +393,27 @@ class GroqClient:
         if response.status_code == 429:
             raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
         response.raise_for_status()
-        models = response.json().get("data", [])
+        return [
+            item.get("id", "")
+            for item in response.json().get("data", [])
+            if item.get("id")
+        ]
+
+    def _check_model(self) -> None:
+        try:
+            models = self._models()
+        except (ProviderUnavailableError, requests.RequestException) as exc:
+            logger.warning("Could not check Groq models at startup: %s", type(exc).__name__)
+            return
+        if self.model not in models:
+            logger.warning(
+                "Configured Groq model not found: %s. Available models include: %s",
+                self.model,
+                ", ".join(models[:20]) or "(none reported)",
+            )
+
+    def _discover_model(self) -> str:
+        models = self._models()
         preferred_markers = ("qwen", "gpt-oss", "llama", "mixtral", "mistral", "gemma")
         excluded_markers = (
             "prompt-guard",
@@ -376,6 +461,8 @@ class GroqClient:
             logger.info("llm_call feature=%s provider=groq model=%s attempt=%s prompt_chars=%s status=%s", feature, self.model, attempt + 1, len(prompt), response.status_code)
             if response.status_code == 429:
                 raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
+            if response.status_code == 404:
+                raise ProviderUnavailableError("Groq model was not found.", "model_not_found")
             if response.status_code >= 500 and attempt == 0:
                 continue
             if response.status_code in {401, 403}:
@@ -409,6 +496,8 @@ class GroqClient:
                 raise ProviderUnavailableError("Groq authentication failed.", "auth")
             if response.status_code == 429:
                 raise ProviderUnavailableError("Groq rate limit reached.", "quota", _retry_after(response))
+            if response.status_code == 404:
+                raise ProviderUnavailableError("Groq model was not found.", "model_not_found")
             if response.status_code >= 500:
                 raise ProviderUnavailableError("Groq service unavailable.", "transient")
             response.raise_for_status()
@@ -579,6 +668,8 @@ class LLMClient:
         return {
             provider: {
                 "configured": self._provider_client(provider) is not None,
+                "configured_model": getattr(self._provider_client(provider), "model", None),
+                "fallback_model": getattr(self._provider_client(provider), "fallback_model", None),
                 "blocked_until": (time.time() + max(0, until - now)) if (until := self._disabled_until.get(provider, 0)) > now else None,
                 "last_error_kind": self._last_error_kind.get(provider),
                 "calls_last_60s": self._limiters[provider].recent(),
