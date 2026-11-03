@@ -31,7 +31,8 @@ export default function QuizPanel({
   loading,
   error,
   onClose,
-  onGenerate, embedded = false,
+  onGenerate,
+  embedded = false,
 }: QuizPanelProps) {
   const [count, setCount] = useState(5);
   const [difficulty, setDifficulty] = useState<QuizDifficulty>('medium');
@@ -69,8 +70,7 @@ export default function QuizPanel({
     setFlipped(false);
   };
 
-  return (
-    <ModalShell title="Quiz me" label="Document practice" onClose={onClose} embedded={embedded}>
+  const content = (
         <div className="space-y-4">
           <div className="flex flex-wrap items-end gap-3">
             <label className="flex flex-col gap-1 text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -301,6 +301,16 @@ export default function QuizPanel({
             </>
           )}
         </div>
-    </ModalShell>
+  );
+  return embedded ? (
+    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900" aria-label="Quiz">
+      <header className="mb-3 flex items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
+        <h2 className="text-sm font-semibold">Quiz me</h2>
+        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
+      </header>
+      {content}
+    </aside>
+  ) : (
+    <ModalShell title="Quiz me" label="Document practice" onClose={onClose}>{content}</ModalShell>
   );
 }

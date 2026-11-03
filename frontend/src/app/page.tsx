@@ -165,6 +165,48 @@ interface SavedArtifact {
 
 type ExportFormat = 'pdf' | 'docx';
 
+type PromptAction =
+  | 'mindmap'
+  | 'chart'
+  | 'quiz'
+  | 'compare'
+  | 'summary'
+  | 'action_items'
+  | 'risks'
+  | 'terms';
+
+function normalizePrompt(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function promptAction(value: string): PromptAction | null {
+  const prompt = normalizePrompt(value);
+  if (!/^(make|create|generate|show|give|draw|build|prepare|do|run)\b/.test(prompt)) {
+    return null;
+  }
+
+  if (/\b(mind\s*map|mindmap|mindmapp|mind\s*max)\b/.test(prompt)) return 'mindmap';
+  if (/\b(chart|charts|chrat|char)\b/.test(prompt)) return 'chart';
+  if (/\b(quiz|quize|quizz|questionnaire)\b/.test(prompt)) return 'quiz';
+  if (/\b(compare|compar|comparison|difference|differences)\b/.test(prompt)) return 'compare';
+  if (/\b(summary|summarize|summry|executive)\b/.test(prompt)) return 'summary';
+  if (/\b(action\s*items?|actions|tasks|todo)\b/.test(prompt)) return 'action_items';
+  if (/\b(risks?|risk|caveats?|limitations?)\b/.test(prompt)) return 'risks';
+  if (/\b(terms?|glossary|definitions?|concepts?)\b/.test(prompt)) return 'terms';
+  return null;
+}
+
+const COMMAND_PROMPTS: Record<Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>, string> = {
+  summary: 'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
+  action_items: 'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
+  risks: 'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
+  terms: 'Create a concise glossary of important terms and concepts from the uploaded documents. Explain each in plain language and cite the supporting page or location.',
+};
+
 interface ExportMenuProps {
   label: string;
   disabled?: boolean;
@@ -308,35 +350,6 @@ const GREETINGS: Record<
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function editDistance(left: string, right: string): number {
-  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= left.length; i += 1) {
-    let diagonal = row[0];
-    row[0] = i;
-    for (let j = 1; j <= right.length; j += 1) {
-      const previous = row[j];
-      row[j] = left[i - 1] === right[j - 1]
-        ? diagonal
-        : Math.min(diagonal + 1, row[j] + 1, row[j - 1] + 1);
-      diagonal = previous;
-    }
-  }
-  return row[right.length];
-}
-
-function analysisIntent(value: string): { kind: 'mindmap' | 'quiz' | 'chart' | 'summary' | 'compare' | 'actions'; rest: string } | null {
-  const normalized = value.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
-  const words = normalized.split(/\s+/).filter(Boolean);
-  const match = (terms: string[]) => words.some((word) => terms.some((term) => word === term || editDistance(word, term) <= (term.length > 5 ? 2 : 1)));
-  if (match(['mindmap']) || (match(['mind']) && match(['map']))) return { kind: 'mindmap', rest: value };
-  if (match(['quiz', 'quizz'])) return { kind: 'quiz', rest: value };
-  if (match(['chart', 'charts', 'graph', 'plot'])) return { kind: 'chart', rest: value };
-  if (match(['summary', 'summarize', 'summarise', 'overview'])) return { kind: 'summary', rest: value };
-  if (match(['compare', 'comparison', 'difference', 'differences'])) return { kind: 'compare', rest: value };
-  if (match(['action', 'actions', 'task', 'tasks', 'todo'])) return { kind: 'actions', rest: value };
-  return null;
 }
 
 function linkInlineCitations(answer: string, sources: SourceMetadata[]): string {
@@ -681,6 +694,7 @@ export default function Home() {
   const [viewerLocation, setViewerLocation] = useState<string | null>(null);
   const [viewerText, setViewerText] = useState<string | null>(null);
   const [visualStudioOpen, setVisualStudioOpen] = useState(false);
+  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare'>('visual');
   const [visualStudioTab, setVisualStudioTab] = useState<VisualStudioTab>('mindmap');
   const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
   const [mindMapLoading, setMindMapLoading] = useState(false);
@@ -1260,6 +1274,7 @@ export default function Home() {
     const hasCurrentMindMap = mindMapConversationId === targetConversationId;
     if (mindMapRequestRef.current) return;
     setVisualStudioOpen(true);
+    setSidePanelKind('visual');
     setVisualStudioTab('mindmap');
     setMindMapConversationId(targetConversationId);
     setMindMapError(null);
@@ -1309,6 +1324,7 @@ export default function Home() {
     const hasCurrentCache = visualCacheConversationId === targetConversationId;
     if (visualRequestRef.current) return;
     setVisualStudioOpen(true);
+    setSidePanelKind('visual');
     setVisualStudioTab(kind);
     if (!regenerate && hasCurrentCache && visualCache[kind]) {
       setVisualLoading(false);
@@ -1361,6 +1377,7 @@ export default function Home() {
     setQuizConversationId(activeConversationId);
     setQuizError(null);
     setQuizOpen(true);
+    setSidePanelKind('quiz');
     setVisualStudioOpen(true);
   };
 
@@ -1401,14 +1418,15 @@ export default function Home() {
   const handleCloseQuiz = () => {
     quizRequestIdRef.current += 1;
     setQuizOpen(false);
-    setVisualStudioOpen(false);
     setQuizLoading(false);
+    setVisualStudioOpen(false);
   };
 
   const handleOpenCompare = () => {
     setCompareConversationId(activeConversationId);
     setCompareError(null);
     setCompareOpen(true);
+    setSidePanelKind('compare');
     setVisualStudioOpen(true);
   };
 
@@ -1456,8 +1474,8 @@ export default function Home() {
   const handleCloseCompare = () => {
     compareRequestIdRef.current += 1;
     setCompareOpen(false);
-    setVisualStudioOpen(false);
     setCompareLoading(false);
+    setVisualStudioOpen(false);
   };
 
   /* Query */
@@ -1466,29 +1484,29 @@ export default function Home() {
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
 
-    const intent = presetQuery ? null : analysisIntent(requestedQuery);
-    if (intent) {
+    const action = promptAction(requestedQuery);
+    if (action === 'mindmap') {
+      await handleGenerateMindMap(requestedQuery);
       setQuery('');
-      if (intent.kind === 'mindmap') {
-        await handleGenerateMindMap(requestedQuery);
-      } else if (intent.kind === 'quiz') {
-        handleOpenQuiz();
-      } else if (intent.kind === 'chart') {
-        await handleGenerateVisual('chart', requestedQuery);
-      } else if (intent.kind === 'compare') {
-        handleOpenCompare();
-      } else {
-        const prompt = intent.kind === 'summary'
-          ? 'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.'
-          : 'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.';
-        await handleSendQuery(undefined, prompt);
-      }
       return;
     }
-
-    const visualMatch = requestedQuery.trim().match(/^(?:draw|show|make|create)\s+(?:a\s+)?chart\b\s*(.*)$/i);
-    if (visualMatch) {
-      await handleGenerateVisual('chart', visualMatch[1]);
+    if (action === 'chart') {
+      await handleGenerateVisual('chart', requestedQuery);
+      setQuery('');
+      return;
+    }
+    if (action === 'quiz') {
+      handleOpenQuiz();
+      setQuery('');
+      return;
+    }
+    if (action === 'compare') {
+      handleOpenCompare();
+      setQuery('');
+      return;
+    }
+    if (action && action in COMMAND_PROMPTS) {
+      await handleSendQuery(undefined, COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>]);
       setQuery('');
       return;
     }
@@ -3040,6 +3058,59 @@ export default function Home() {
         </aside>
       )}
 
+      {visualStudioOpen && (
+        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
+          <div
+            onMouseDown={startViewerResize}
+            className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize visual studio"
+          >
+            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
+          </div>
+          {sidePanelKind === 'visual' ? (
+            <VisualPanel
+              embedded
+              tab={visualStudioTab}
+              visualData={visualCache}
+              visualLoading={visualLoading}
+              visualError={visualError}
+              mindMapData={mindMapData}
+              mindMapLoading={mindMapLoading}
+              mindMapError={mindMapError}
+              canGenerateMindMap={hasIndexedDocuments}
+              onClose={() => setVisualStudioOpen(false)}
+              onTabChange={handleVisualStudioTab}
+              onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+              onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
+              onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
+              onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
+            />
+          ) : sidePanelKind === 'quiz' ? (
+            <QuizPanel
+              key={`${quizConversationId}-${quizPanelVersion}`}
+              data={quizData}
+              loading={quizLoading}
+              error={quizError}
+              onClose={handleCloseQuiz}
+              onGenerate={handleGenerateQuiz}
+              embedded
+            />
+          ) : (
+            <ComparePanel
+              files={[...new Set(activeChatFiles.filter((file) => file.status === 'completed').map((file) => file.name))]}
+              data={compareData}
+              loading={compareLoading}
+              error={compareError}
+              onClose={handleCloseCompare}
+              onCompare={handleCompareDocuments}
+              embedded
+            />
+          )}
+        </aside>
+      )}
+
       {/* Mobile File Viewer — see MobileFileViewer.tsx for why this is a
           separately dynamic-imported chunk rather than inline JSX here. */}
       {viewerFile && (
@@ -3053,47 +3124,32 @@ export default function Home() {
         />
       )}
 
-      {visualStudioOpen && !quizOpen && !compareOpen && (
-        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
-          <div onMouseDown={startViewerResize} className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center" role="separator" aria-orientation="vertical" aria-label="Resize visual studio">
-            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
-          </div>
-          <VisualPanel
-            embedded
-            tab={visualStudioTab}
-            visualData={visualCache}
-            visualLoading={visualLoading}
-            visualError={visualError}
-            mindMapData={mindMapData}
-            mindMapLoading={mindMapLoading}
-            mindMapError={mindMapError}
-            canGenerateMindMap={hasIndexedDocuments}
-            onClose={() => setVisualStudioOpen(false)}
-            onTabChange={handleVisualStudioTab}
-            onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-            onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-            onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
-            onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
-          />
-        </aside>
+      {quizOpen && !visualStudioOpen && quizConversationId === activeConversationId && (
+        <QuizPanel
+          key={`${quizConversationId}-${quizPanelVersion}`}
+          data={quizData}
+          loading={quizLoading}
+          error={quizError}
+          onClose={handleCloseQuiz}
+          onGenerate={handleGenerateQuiz}
+        />
       )}
 
-      {quizOpen && quizConversationId === activeConversationId && (
-        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
-          <div onMouseDown={startViewerResize} className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center" role="separator" aria-orientation="vertical" aria-label="Resize quiz panel">
-            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
-          </div>
-          <QuizPanel key={`${quizConversationId}-${quizPanelVersion}`} data={quizData} loading={quizLoading} error={quizError} onClose={handleCloseQuiz} onGenerate={handleGenerateQuiz} embedded />
-        </aside>
-      )}
-
-      {compareOpen && compareConversationId === activeConversationId && (
-        <aside className="hidden md:flex shrink-0 relative" style={{ width: viewerWidth }}>
-          <div onMouseDown={startViewerResize} className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center" role="separator" aria-orientation="vertical" aria-label="Resize compare panel">
-            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
-          </div>
-          <ComparePanel files={[...new Set(activeChatFiles.filter((file) => file.status === 'completed').map((file) => file.name))]} data={compareData} loading={compareLoading} error={compareError} onClose={handleCloseCompare} onCompare={handleCompareDocuments} embedded />
-        </aside>
+      {compareOpen && !visualStudioOpen && compareConversationId === activeConversationId && (
+        <ComparePanel
+          files={[
+            ...new Set(
+              activeChatFiles
+                .filter((file) => file.status === 'completed')
+                .map((file) => file.name),
+            ),
+          ]}
+          data={compareData}
+          loading={compareLoading}
+          error={compareError}
+          onClose={handleCloseCompare}
+          onCompare={handleCompareDocuments}
+        />
       )}
 
       {printExport && (

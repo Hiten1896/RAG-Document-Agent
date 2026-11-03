@@ -21,7 +21,8 @@ export default function ComparePanel({
   loading,
   error,
   onClose,
-  onCompare, embedded = false,
+  onCompare,
+  embedded = false,
 }: ComparePanelProps) {
   const [selectedFiles, setSelectedFiles] = useState(() => files.slice(0, 2));
   const [focus, setFocus] = useState('');
@@ -37,8 +38,7 @@ export default function ComparePanel({
     });
   };
 
-  return (
-    <ModalShell title="Compare documents" label="Document comparison" onClose={onClose} embedded={embedded}>
+  const content = (
         <div className="space-y-4">
           {hasTwoFiles ? (
             <>
@@ -175,6 +175,16 @@ export default function ComparePanel({
             </div>
           )}
         </div>
-    </ModalShell>
+  );
+  return embedded ? (
+    <aside className="flex h-full min-h-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900" aria-label="Compare documents">
+      <header className="mb-3 flex items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
+        <h2 className="text-sm font-semibold">Compare documents</h2>
+        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
+      </header>
+      {content}
+    </aside>
+  ) : (
+    <ModalShell title="Compare documents" label="Document comparison" onClose={onClose}>{content}</ModalShell>
   );
 }
