@@ -43,7 +43,7 @@ function downloadBlob(blob: Blob, filename: string) {
 function ChartView({ data }: { data: VisualChart }) {
   const values = data.labels.map((label, index) => ({ label, value: data.values[index] }));
   const chart = data.type === 'line' ? <LineChart data={values}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="label" /><YAxis /><Tooltip /><Line type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={2} /></LineChart> : data.type === 'pie' ? <PieChart><Pie data={values} dataKey="value" nameKey="label" outerRadius="75%" label>{values.map((entry, index) => <Cell key={entry.label} fill={colors[index % colors.length]} />)}</Pie><Tooltip /></PieChart> : <BarChart data={values}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="label" /><YAxis /><Tooltip /><Bar dataKey="value" fill="#6366f1" /></BarChart>;
-  return <><h3 className="mb-1 text-lg font-semibold">{data.title}</h3><div className="h-72 w-full"><ResponsiveContainer width="100%" height="100%">{chart}</ResponsiveContainer></div><Source value={data.source} /><div className="mt-3 flex gap-2"><button type="button" onClick={() => downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'visual-chart.json')} className="visual-download"><Download className="h-3.5 w-3.5" />Download data</button></div></>;
+  return <div className="min-w-0 w-full"><h3 className="mb-1 text-lg font-semibold">{data.title}</h3><div className="h-72 min-w-0 w-full"><ResponsiveContainer width="100%" height="100%" minWidth={0}>{chart}</ResponsiveContainer></div><Source value={data.source} /><div className="mt-3 flex gap-2"><button type="button" onClick={() => downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), 'visual-chart.json')} className="visual-download"><Download className="h-3.5 w-3.5" />Download data</button></div></div>;
 }
 
 export default function VisualPanel({ tab, visualData, visualLoading, visualError, mindMapData, mindMapLoading, mindMapError, canGenerateMindMap, onClose, onTabChange, onRetry, onRegenerate, onMindMapRetry, onMindMapRegenerate, embedded = false }: Props & { embedded?: boolean }) {
@@ -56,7 +56,7 @@ export default function VisualPanel({ tab, visualData, visualLoading, visualErro
         {(['mindmap', 'chart'] as const).map((nextTab) => <button key={nextTab} type="button" onClick={() => onTabChange(nextTab)} className={`whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold ${nextTab === tab ? 'bg-white text-indigo-700 shadow-sm dark:bg-slate-700 dark:text-indigo-200' : 'text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100'}`}>{nextTab === 'mindmap' ? 'Mind map' : 'Chart'}</button>)}
       </nav>
       {tab === 'mindmap' && <MindMapPanel data={mindMapData} loading={mindMapLoading} error={mindMapError} canGenerate={canGenerateMindMap} onClose={onClose} onRetry={onMindMapRetry} onRegenerate={onMindMapRegenerate} embedded />}
-      {tab !== 'mindmap' && <div className="mb-4 flex justify-end"><button type="button" onClick={onRegenerate} disabled={loading} className="visual-download"><RefreshCw className="h-3.5 w-3.5" />Regenerate</button></div>}
+      {tab !== 'mindmap' && <div className="mb-4 flex justify-end"><button type="button" onClick={onRegenerate} disabled={loading} className="visual-download" title="Regenerate" aria-label="Regenerate"><RefreshCw className="h-3.5 w-3.5" /></button></div>}
       {tab !== 'mindmap' && loading && <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin" />Preparing a grounded visual…</div>}
       {tab !== 'mindmap' && !loading && error && <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-center"><p className="text-sm text-rose-600 dark:text-rose-300">{error}</p><button type="button" onClick={onRetry} className="visual-download"><RefreshCw className="h-3.5 w-3.5" />Retry</button></div>}
       {tab !== 'mindmap' && !loading && !error && data && <ChartView data={data as VisualChart} />}
@@ -75,7 +75,7 @@ export default function VisualPanel({ tab, visualData, visualLoading, visualErro
           <X className="h-4 w-4" />
         </button>
       </header>
-      <div className="min-h-0 flex-1 overflow-hidden">{content}</div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">{content}</div>
     </aside>
   ) : <ModalShell title="Visual studio" label="Grounded visual answer" onClose={onClose}>{content}</ModalShell>;
 }
