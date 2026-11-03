@@ -1,6 +1,6 @@
 'use client';
 
-import { Download, Loader2, RefreshCw } from 'lucide-react';
+import { Download, Loader2, RefreshCw, X } from 'lucide-react';
 import type { MindMapResponse, VisualChart, VisualKind, VisualResponse } from '@/lib/api';
 import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import ModalShell from './ModalShell';
@@ -65,7 +65,15 @@ export default function VisualPanel({ tab, visualData, visualLoading, visualErro
     <aside className="flex h-full min-h-0 flex-col overflow-hidden border-l border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900" aria-label="Visual studio">
       <header className="mb-3 flex shrink-0 items-center justify-between border-b border-slate-200 pb-3 dark:border-slate-800">
         <h2 className="text-sm font-semibold">Visual studio</h2>
-        <button type="button" onClick={onClose} className="rounded-lg px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800">Close</button>
+        <button
+          type="button"
+          onClick={onClose}
+          className="shrink-0 rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+          aria-label="Close visual studio"
+          title="Close"
+        >
+          <X className="h-4 w-4" />
+        </button>
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto">{content}</div>
     </aside>
