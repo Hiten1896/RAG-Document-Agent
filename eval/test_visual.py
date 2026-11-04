@@ -19,6 +19,30 @@ def stored(session: str, chat: str, text: str, location: str = "page 1"):
 
 
 class VisualEndpointTests(unittest.TestCase):
+    def test_api_cors_preflight_allows_visual_request_headers(self):
+        origin = (
+            main._allowed_origins[0]
+            if main._allowed_origins
+            else "https://frontend.example"
+        )
+        with TestClient(main.app) as client:
+            response = client.options(
+                "/api/visual",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": (
+                        "content-type,x-session-id,x-chat-id,x-debug"
+                    ),
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        allowed_headers = response.headers["access-control-allow-headers"].lower()
+        self.assertIn("x-session-id", allowed_headers)
+        self.assertIn("x-chat-id", allowed_headers)
+        self.assertIn("x-debug", allowed_headers)
+
     def request(self, payload, llm, vector_store, session="visual", chat="chat"):
         with (
             patch.object(main, "vector_store", vector_store),

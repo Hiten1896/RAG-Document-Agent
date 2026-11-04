@@ -31,6 +31,8 @@ export type PromptAction =
 export interface IntentResponse {
   action: PromptAction | null;
   topic: string;
+  retrieval_query?: string;
+  overview?: boolean;
 }
 
 export interface QueryResponse {
@@ -510,6 +512,8 @@ export async function queryDocument(
   chatId?: string,
   top_k: number = 4,
   debug = false,
+  retrievalQuery?: string,
+  overview = false,
 ): Promise<QueryResponse> {
   let response: Response;
   try {
@@ -520,7 +524,14 @@ export async function queryDocument(
         ...sessionHeaders(chatId),
         ...(debug ? { 'X-Debug': 'true' } : {}),
       },
-      body: JSON.stringify({ query, top_k }),
+      body: JSON.stringify({
+        query,
+        top_k,
+        ...(retrievalQuery?.trim()
+          ? { retrieval_query: retrievalQuery.trim() }
+          : {}),
+        ...(overview ? { overview: true } : {}),
+      }),
       signal: timeoutSignal(QUERY_TIMEOUT_MS),
     });
   } catch (err) {
@@ -566,6 +577,8 @@ export async function streamQueryDocument(
   debug: boolean,
   signal: AbortSignal,
   onEvent: (event: QueryStreamEvent) => void,
+  retrievalQuery?: string,
+  overview = false,
 ): Promise<void> {
   const timeoutController = new AbortController();
   const timeoutId = window.setTimeout(
@@ -585,7 +598,13 @@ export async function streamQueryDocument(
         ...sessionHeaders(chatId),
         ...(debug ? { 'X-Debug': 'true' } : {}),
       },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({
+        query,
+        ...(retrievalQuery?.trim()
+          ? { retrieval_query: retrievalQuery.trim() }
+          : {}),
+        ...(overview ? { overview: true } : {}),
+      }),
       signal: timeoutController.signal,
       cache: 'no-store',
     });

@@ -816,7 +816,9 @@ export default function Home() {
   const visualRequestRef = useRef(false);
   const ingestionPromisesRef = useRef(new Map<string, Promise<boolean>>());
   const ingestedFilesRef = useRef(ingestedFiles);
-  ingestedFilesRef.current = ingestedFiles;
+  useEffect(() => {
+    ingestedFilesRef.current = ingestedFiles;
+  }, [ingestedFiles]);
   const [compareOpen, setCompareOpen] = useState(false);
   const [compareData, setCompareData] = useState<CompareResponse | null>(null);
   const [compareLoading, setCompareLoading] = useState(false);
@@ -1493,6 +1495,7 @@ export default function Home() {
     setMindMapConversationId(targetConversationId);
     setMindMapError(null);
     setMindMapTopic(normalizedTopic);
+    if (!hasCurrentMindMap) setMindMapData(null);
     if (!regenerate && hasCurrentMindMap && mindMapData) {
       setMindMapLoading(false);
       return;
@@ -1597,6 +1600,9 @@ export default function Home() {
     setCompareOpen(false);
     setArtifactsOpen(false);
     setQuizConversationId(activeConversationId);
+    quizRequestIdRef.current += 1;
+    setQuizData(null);
+    setQuizLoading(false);
     setQuizError(null);
     setQuizOpen(true);
     setSidePanelKind('quiz');
@@ -1654,6 +1660,9 @@ export default function Home() {
     setQuizOpen(false);
     setArtifactsOpen(false);
     setCompareConversationId(activeConversationId);
+    compareRequestIdRef.current += 1;
+    setCompareData(null);
+    setCompareLoading(false);
     setCompareError(null);
     setCompareOpen(true);
     setSidePanelKind('compare');
@@ -1718,6 +1727,8 @@ export default function Home() {
     e?: React.FormEvent,
     presetQuery?: string,
     displayQuery?: string,
+    retrievalQueryOverride?: string,
+    overviewOverride = false,
   ) => {
     if (e) e.preventDefault();
     const requestedQuery = presetQuery ?? query;
@@ -1739,14 +1750,24 @@ export default function Home() {
     // intent detection on them would dispatch the same command recursively.
     let action: PromptAction | null = presetQuery ? null : promptAction(requestedQuery);
     let classifiedTopic = '';
+    let retrievalQuery = retrievalQueryOverride ?? '';
+    let overview = overviewOverride;
     if (!presetQuery) {
+      if (action === 'mindmap') {
+        await waitForDocuments(targetConversationId, attachedFiles);
+        await handleGenerateMindMap(promptTopic(requestedQuery, 'mindmap'));
+        return;
+      }
       try {
-        const classified = await classifyIntent(requestedQuery, activeConversationId);
-        if (classified.action) action = classified.action;
+        const classified = await classifyIntent(requestedQuery, targetConversationId);
+        action = action ?? classified.action;
         classifiedTopic = classified.topic;
+        retrievalQuery = classified.retrieval_query || '';
+        overview = classified.overview ?? false;
       } catch {
         // Keep the local classifier as a deterministic fallback if the
         // optional intent call is unavailable or rate-limited.
+        overview = action === 'summary';
       }
     }
     if (action === 'mindmap') {
@@ -1787,6 +1808,8 @@ export default function Home() {
         undefined,
         COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>],
         requestedQuery,
+        retrievalQuery,
+        overview || action === 'summary',
       );
       setQuery('');
       return;
@@ -1873,6 +1896,8 @@ export default function Home() {
               }));
             }
           },
+          retrievalQuery,
+          overview,
         );
       } catch (err: unknown) {
         const message = getErrorMessage(err, 'Could not generate an answer.');
@@ -1900,7 +1925,14 @@ export default function Home() {
     try {
       // No `source` filter is passed, so the backend searches across every
       // ingested document's chunks rather than restricting to one file.
-      const res = await queryDocument(requestText, targetConversationId, 4, true);
+      const res = await queryDocument(
+        requestText,
+        targetConversationId,
+        4,
+        true,
+        retrievalQuery,
+        overview,
+      );
       setMessagesForActive((prev) => [
         ...prev,
         {
@@ -2260,6 +2292,88 @@ export default function Home() {
   const activeGeneratedArtifacts = generatedArtifacts.filter(
     (artifact) => artifact.conversationId === activeConversationId,
   );
+  const isMindMapForActiveConversation =
+    mindMapConversationId === activeConversationId;
+  const isVisualForActiveConversation =
+    visualCacheConversationId === activeConversationId;
+  const isQuizForActiveConversation =
+    quizConversationId === activeConversationId;
+  const isCompareForActiveConversation =
+    compareConversationId === activeConversationId;
+  const renderSidePanel = (embedded: boolean) => {
+    if (sidePanelKind === 'artifacts') {
+      return (
+        <ArtifactPanel
+          artifacts={activeGeneratedArtifacts}
+          onOpen={openGeneratedArtifact}
+          onClose={() => {
+            setArtifactsOpen(false);
+            setVisualStudioOpen(false);
+          }}
+        />
+      );
+    }
+    if (sidePanelKind === 'visual') {
+      return (
+        <VisualPanel
+          embedded={embedded}
+          tab={visualStudioTab}
+          visualData={isVisualForActiveConversation ? visualCache : {}}
+          visualLoading={isVisualForActiveConversation && visualLoading}
+          visualError={isVisualForActiveConversation ? visualError : null}
+          mindMapData={isMindMapForActiveConversation ? mindMapData : null}
+          mindMapLoading={isMindMapForActiveConversation && mindMapLoading}
+          mindMapError={isMindMapForActiveConversation ? mindMapError : null}
+          canGenerateMindMap={hasIndexedDocuments}
+          onClose={() => setVisualStudioOpen(false)}
+          onRetry={() => {
+            if (visualStudioTab !== 'mindmap') {
+              void handleGenerateVisual(visualStudioTab, '', true);
+            }
+          }}
+          onRegenerate={() => {
+            if (visualStudioTab !== 'mindmap') {
+              void handleGenerateVisual(visualStudioTab, '', true);
+            }
+          }}
+          onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
+          onMindMapRegenerate={() =>
+            void handleGenerateMindMap(mindMapTopic, true)
+          }
+        />
+      );
+    }
+    if (sidePanelKind === 'quiz') {
+      return (
+        <QuizPanel
+          key={`${quizConversationId}-${quizPanelVersion}`}
+          data={isQuizForActiveConversation ? quizData : null}
+          loading={isQuizForActiveConversation && quizLoading}
+          error={isQuizForActiveConversation ? quizError : null}
+          onClose={handleCloseQuiz}
+          onGenerate={handleGenerateQuiz}
+          embedded={embedded}
+        />
+      );
+    }
+    return (
+      <ComparePanel
+        files={[
+          ...new Set(
+            activeChatFiles
+              .filter((file) => file.status === 'completed')
+              .map((file) => file.name),
+          ),
+        ]}
+        data={isCompareForActiveConversation ? compareData : null}
+        loading={isCompareForActiveConversation && compareLoading}
+        error={isCompareForActiveConversation ? compareError : null}
+        onClose={handleCloseCompare}
+        onCompare={handleCompareDocuments}
+        embedded={embedded}
+      />
+    );
+  };
   const boundedViewerWidth = Math.min(
     Math.max(viewerWidth, MIN_VIEWER_WIDTH),
     MAX_VIEWER_WIDTH,
@@ -2361,6 +2475,7 @@ export default function Home() {
                 setArtifactsOpen(true);
                 setVisualStudioOpen(true);
                 setSidePanelKind('artifacts');
+                setSidebarOpen(false);
               }}
               className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer relative"
               aria-label="Open artifacts"
@@ -2540,7 +2655,7 @@ export default function Home() {
         )}
 
         {/* Mobile Top Bar */}
-        <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
+        <div className="md:hidden flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
           <button
             type="button"
             onClick={() => setSidebarOpen(true)}
@@ -3075,7 +3190,7 @@ export default function Home() {
             background) so it reads as a composer sitting in the chat rather
             than a fixed toolbar underneath it. */}
         {!isEmptyChat && (
-          <div className="px-3 sm:px-4 lg:px-6 pb-3 sm:pb-4 lg:pb-5 pt-2 shrink-0">
+          <div className="px-3 sm:px-4 lg:px-6 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 lg:pb-5 pt-2 shrink-0">
             <div className="max-w-4xl mx-auto">
               {messages.some((message) => message.sender === 'user') && (
                 <div className="mb-2 flex justify-end">
@@ -3201,54 +3316,31 @@ export default function Home() {
           >
             <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
           </div>
-          {sidePanelKind === 'artifacts' ? (
-            <ArtifactPanel
-              artifacts={activeGeneratedArtifacts}
-              onOpen={openGeneratedArtifact}
-              onClose={() => {
-                setArtifactsOpen(false);
-                setVisualStudioOpen(false);
-              }}
-            />
-          ) : sidePanelKind === 'visual' ? (
-            <VisualPanel
-              embedded
-              tab={visualStudioTab}
-              visualData={visualCache}
-              visualLoading={visualLoading}
-              visualError={visualError}
-              mindMapData={mindMapData}
-              mindMapLoading={mindMapLoading}
-              mindMapError={mindMapError}
-              canGenerateMindMap={hasIndexedDocuments}
-              onClose={() => setVisualStudioOpen(false)}
-              onRetry={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-              onRegenerate={() => { if (visualStudioTab !== 'mindmap') void handleGenerateVisual(visualStudioTab, '', true); }}
-              onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
-              onMindMapRegenerate={() => void handleGenerateMindMap(mindMapTopic, true)}
-            />
-          ) : sidePanelKind === 'quiz' ? (
-            <QuizPanel
-              key={`${quizConversationId}-${quizPanelVersion}`}
-              data={quizData}
-              loading={quizLoading}
-              error={quizError}
-              onClose={handleCloseQuiz}
-              onGenerate={handleGenerateQuiz}
-              embedded
-            />
-          ) : (
-            <ComparePanel
-              files={[...new Set(activeChatFiles.filter((file) => file.status === 'completed').map((file) => file.name))]}
-              data={compareData}
-              loading={compareLoading}
-              error={compareError}
-              onClose={handleCloseCompare}
-              onCompare={handleCompareDocuments}
-              embedded
-            />
-          )}
+          {renderSidePanel(true)}
         </aside>
+      )}
+
+      {visualStudioOpen && (
+        <div
+          className="fixed inset-0 z-[70] flex flex-col justify-end bg-slate-950/60 md:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label={sidePanelKind === 'artifacts' ? 'Artifacts' : 'Document side panel'}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setVisualStudioOpen(false);
+            }
+          }}
+        >
+          <div className="relative flex h-[92dvh] min-h-0 w-full flex-col overflow-hidden rounded-t-2xl bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl dark:bg-slate-900 animate-sheet-up">
+            <div className="flex shrink-0 justify-center pt-2.5 pb-1">
+              <div className="h-1 w-10 rounded-full bg-slate-300 dark:bg-slate-700" />
+            </div>
+            <div className="min-h-0 flex-1">
+              {renderSidePanel(true)}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Mobile File Viewer — see MobileFileViewer.tsx for why this is a

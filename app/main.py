@@ -23,6 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from threading import Lock
+from types import SimpleNamespace
 from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Type
 
 import requests
@@ -95,6 +96,7 @@ SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
 CLEANUP_INTERVAL_SECONDS = 300
 
 RETRIEVAL_K = 4
+OVERVIEW_MAX_CHUNKS = 12
 GROQ_MAX_CONTEXT_CHARS = int(os.getenv("GROQ_MAX_CONTEXT_CHARS", "12000"))
 MINDMAP_MAX_CHUNKS = 24
 MINDMAP_MAX_TEXT_CHARS = 10000
@@ -430,6 +432,8 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     query: str
+    retrieval_query: Optional[str] = Field(default=None, max_length=1000)
+    overview: bool = False
     # The frontend sends top_k; accept and ignore rather than 422 on it.
     top_k: Optional[int] = None
 
@@ -452,6 +456,8 @@ class IntentResponse(BaseModel):
         ]
     ] = None
     topic: str = ""
+    retrieval_query: str = Field(default="", max_length=1000)
+    overview: bool = False
 
 
 class MindMapRequest(BaseModel):
@@ -735,14 +741,25 @@ def _open_llm_stream(client: Any, prompt: str, groq_prompt: Optional[str], featu
         return client.open_stream(prompt, groq_prompt)
 
 
-INTENT_PROMPT = """Classify the user's request for a document assistant.
-Return JSON only with this exact shape: {"action": null, "topic": ""}.
+INTENT_PROMPT = """Classify and plan retrieval for the user's request to a document assistant.
+Return JSON only with this exact shape:
+{"action": null, "topic": "", "retrieval_query": "", "overview": false}.
 action must be one of mindmap, chart, quiz, compare, summary, action_items,
 risks, terms, or null when the user is asking a normal document question.
 Understand natural language, misspellings, implied requests such as "compare
 these two", and phrases like "give me the key takeaways". Use topic for the
 subject requested by a mindmap or chart, otherwise use an empty string.
-Do not answer the user's question and do not invent an action.
+Set action to summary for broad requests such as "what's inside this PDF?",
+"tell me about this document", or "give me an overview"; these should produce
+a concise answer in chat, not an artifact. Set overview=true for those broad
+requests so evidence is sampled across the uploaded document(s). For a specific
+question, keep action=null and write a short retrieval_query containing the
+document concepts, entities, and synonyms most likely to locate its evidence.
+Do not merely repeat conversational filler such as "what is in this PDF?" in
+retrieval_query. For summary or other action prompts, retrieval_query may be a
+short description of the needed evidence. Set overview=false unless the user
+wants a broad document overview. Do not answer the user's question or invent
+an action or document fact.
 
 User request:
 """
@@ -757,7 +774,10 @@ def _classify_intent(prompt: str) -> IntentResponse:
         "intent",
     )
     parsed = json.loads(strip_json_wrappers(message_to_text(result.response)))
-    return IntentResponse.model_validate(parsed)
+    classified = IntentResponse.model_validate(parsed)
+    return classified.model_copy(
+        update={"retrieval_query": classified.retrieval_query.strip()[:1000]}
+    )
 
 
 async def generate_json(
@@ -828,6 +848,36 @@ def _evenly_sample(items: List[Dict[str, Any]], limit: int) -> List[Dict[str, An
         return items
     indexes = [round(index * (len(items) - 1) / (limit - 1)) for index in range(limit)]
     return [items[index] for index in indexes]
+
+
+def _overview_query_chunks(
+    session_id: str, chat_id: str
+) -> List[Tuple[Any, Optional[float]]]:
+    stored = vector_store._collection.get(
+        where=session_filter(session_id, chat_id),
+        include=["documents", "metadatas"],
+    )
+    items = [
+        {"text": text or "", "metadata": metadata or {}}
+        for text, metadata in zip(
+            stored.get("documents") or [], stored.get("metadatas") or []
+        )
+        if isinstance(text, str) and text.strip()
+    ]
+    items.sort(
+        key=lambda item: (
+            str(item["metadata"].get("file_name", "")),
+            int(item["metadata"].get("chunk_index", 0)),
+        )
+    )
+    sampled = _evenly_sample(items, OVERVIEW_MAX_CHUNKS)
+    return [
+        (
+            SimpleNamespace(page_content=item["text"], metadata=item["metadata"]),
+            None,
+        )
+        for item in sampled
+    ]
 
 
 def _clip_context(items: List[Dict[str, Any]], max_chars: int) -> List[Dict[str, Any]]:
@@ -1138,35 +1188,52 @@ async def query_document(
     if not question:
         raise HTTPException(status_code=400, detail="Query must not be empty.")
 
-    if jina_embeddings is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Embedding service is not configured (JINA_API_KEY is missing).",
-        )
-
     touch_session(x_session_id, x_chat_id)
 
-    embed_started = time.perf_counter()
-    try:
-        query_embedding = await asyncio.to_thread(jina_embeddings.embed_query, question)
-    except Exception as exc:
-        logger.warning("Query embedding failed for session %s: %s", x_session_id, exc)
-        raise HTTPException(status_code=503, detail="Embedding service unavailable.") from exc
-    embed_ms = round((time.perf_counter() - embed_started) * 1000)
-
     retrieve_started = time.perf_counter()
-    try:
-        scored = await asyncio.to_thread(
-            vector_store.similarity_search_by_vector_with_relevance_scores,
-            query_embedding,
-            RETRIEVAL_K,
-            filter=session_filter(x_session_id, x_chat_id),
-        )
-    except Exception as exc:
-        # Retrieval failing is not fatal — answer without context — but it must
-        # be visible in the logs rather than silently swallowed.
-        logger.warning("Retrieval failed for session %s: %s", x_session_id, exc)
-        scored = []
+    embed_ms = 0
+    if payload.overview:
+        try:
+            scored = await asyncio.to_thread(
+                _overview_query_chunks, x_session_id, x_chat_id
+            )
+        except Exception as exc:
+            logger.warning(
+                "Overview retrieval failed for session %s: %s", x_session_id, exc
+            )
+            scored = []
+    else:
+        if jina_embeddings is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Embedding service is not configured (JINA_API_KEY is missing).",
+            )
+        embed_started = time.perf_counter()
+        try:
+            query_embedding = await asyncio.to_thread(
+                jina_embeddings.embed_query,
+                (payload.retrieval_query or "").strip() or question,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Query embedding failed for session %s: %s", x_session_id, exc
+            )
+            raise HTTPException(
+                status_code=503, detail="Embedding service unavailable."
+            ) from exc
+        embed_ms = round((time.perf_counter() - embed_started) * 1000)
+        try:
+            scored = await asyncio.to_thread(
+                vector_store.similarity_search_by_vector_with_relevance_scores,
+                query_embedding,
+                RETRIEVAL_K,
+                filter=session_filter(x_session_id, x_chat_id),
+            )
+        except Exception as exc:
+            # Retrieval failing is not fatal — answer without context — but it must
+            # be visible in the logs rather than silently swallowed.
+            logger.warning("Retrieval failed for session %s: %s", x_session_id, exc)
+            scored = []
     retrieve_ms = round((time.perf_counter() - retrieve_started) * 1000)
 
     sources = [
@@ -1175,7 +1242,11 @@ async def query_document(
             "page": doc.metadata.get("page"),
             "location": doc.metadata.get("location"),
             "chunk_type": "text",
-            "relevance_score": round(float(score), 4),
+            **(
+                {"relevance_score": round(float(score), 4)}
+                if score is not None
+                else {}
+            ),
         }
         for doc, score in scored
     ]
@@ -1258,12 +1329,16 @@ async def query_document(
                     "source": doc.metadata.get("file_name"),
                     "page": doc.metadata.get("page"),
                     "location": doc.metadata.get("location"),
-                    "relevance_score": round(float(score), 4),
+                    **(
+                        {"relevance_score": round(float(score), 4)}
+                        if score is not None
+                        else {}
+                    ),
                 }
                 for doc, score in scored
             ],
             "prompt": groq_prompt if llm_result.provider == "groq" else prompt,
-            "top_k": RETRIEVAL_K,
+            "top_k": OVERVIEW_MAX_CHUNKS if payload.overview else RETRIEVAL_K,
             "retrieved_count": len(scored),
             "provider": llm_result.provider,
             "model": llm_result.model,
@@ -1295,11 +1370,6 @@ async def stream_query_document(
     question = payload.query.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Query must not be empty.")
-    if jina_embeddings is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Embedding service is not configured (JINA_API_KEY is missing).",
-        )
     touch_session(x_session_id, x_chat_id)
 
     async def stream_events():
@@ -1309,42 +1379,68 @@ async def stream_query_document(
         raw_parts: List[str] = []
         request_started = time.perf_counter()
         try:
-            embed_started = time.perf_counter()
-            try:
-                query_embedding = await asyncio.to_thread(
-                    jina_embeddings.embed_query, question
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Stream query embedding failed for session %s: %s",
-                    x_session_id,
-                    exc,
-                )
-                yield _sse_event(
-                    "error",
-                    {
-                        "message": "Embedding service unavailable.",
-                        "streamed": False,
-                    },
-                )
-                return
-            embed_ms = round((time.perf_counter() - embed_started) * 1000)
-
             retrieve_started = time.perf_counter()
-            try:
-                scored = await asyncio.to_thread(
-                    vector_store.similarity_search_by_vector_with_relevance_scores,
-                    query_embedding,
-                    RETRIEVAL_K,
-                    filter=session_filter(x_session_id, x_chat_id),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Stream query retrieval failed for session %s: %s",
-                    x_session_id,
-                    exc,
-                )
-                scored = []
+            embed_ms = 0
+            if payload.overview:
+                try:
+                    scored = await asyncio.to_thread(
+                        _overview_query_chunks, x_session_id, x_chat_id
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Stream overview retrieval failed for session %s: %s",
+                        x_session_id,
+                        exc,
+                    )
+                    scored = []
+            else:
+                if jina_embeddings is None:
+                    yield _sse_event(
+                        "error",
+                        {
+                            "message": (
+                                "Embedding service is not configured "
+                                "(JINA_API_KEY is missing)."
+                            ),
+                            "streamed": False,
+                        },
+                    )
+                    return
+                embed_started = time.perf_counter()
+                try:
+                    query_embedding = await asyncio.to_thread(
+                        jina_embeddings.embed_query,
+                        (payload.retrieval_query or "").strip() or question,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Stream query embedding failed for session %s: %s",
+                        x_session_id,
+                        exc,
+                    )
+                    yield _sse_event(
+                        "error",
+                        {
+                            "message": "Embedding service unavailable.",
+                            "streamed": False,
+                        },
+                    )
+                    return
+                embed_ms = round((time.perf_counter() - embed_started) * 1000)
+                try:
+                    scored = await asyncio.to_thread(
+                        vector_store.similarity_search_by_vector_with_relevance_scores,
+                        query_embedding,
+                        RETRIEVAL_K,
+                        filter=session_filter(x_session_id, x_chat_id),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Stream query retrieval failed for session %s: %s",
+                        x_session_id,
+                        exc,
+                    )
+                    scored = []
             retrieve_ms = round((time.perf_counter() - retrieve_started) * 1000)
 
             sources = [
@@ -1353,7 +1449,11 @@ async def stream_query_document(
                     "page": doc.metadata.get("page"),
                     "location": doc.metadata.get("location"),
                     "chunk_type": "text",
-                    "relevance_score": round(float(score), 4),
+                    **(
+                        {"relevance_score": round(float(score), 4)}
+                        if score is not None
+                        else {}
+                    ),
                 }
                 for doc, score in scored
             ]
@@ -1467,14 +1567,18 @@ async def stream_query_document(
                             "source": doc.metadata.get("file_name"),
                             "page": doc.metadata.get("page"),
                             "location": doc.metadata.get("location"),
-                            "relevance_score": round(float(score), 4),
+                            **(
+                                {"relevance_score": round(float(score), 4)}
+                                if score is not None
+                                else {}
+                            ),
                         }
                         for doc, score in scored
                     ],
                     "prompt": (
                         groq_prompt if stream_result.provider == "groq" else prompt
                     ),
-                    "top_k": RETRIEVAL_K,
+                    "top_k": OVERVIEW_MAX_CHUNKS if payload.overview else RETRIEVAL_K,
                     "retrieved_count": len(scored),
                     "provider": stream_result.provider,
                     "model": stream_result.model,

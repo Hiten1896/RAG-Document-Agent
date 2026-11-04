@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "DocAgent RAG — Multi-Modal Document Intelligence",
   description:
-    "Upload PDFs and ask questions. Powered by Gemini Vision, ChromaDB vector search, and FastAPI for enterprise-grade document Q&A with page-level citations.",
+    "Upload documents and ask questions. Powered by multimodal document analysis, vector search, and FastAPI for enterprise-grade document Q&A with page-level citations.",
 };
 
 export const viewport: Viewport = {

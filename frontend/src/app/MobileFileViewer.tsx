@@ -37,17 +37,11 @@ export default function MobileFileViewer({
 }) {
   return (
     <div className="md:hidden fixed inset-0 z-[70] flex flex-col justify-end">
-      <style>{`
-        @keyframes slide-up {
-          from { transform: translateY(100%); }
-          to { transform: translateY(0); }
-        }
-      `}</style>
       <div
         className="absolute inset-0 bg-slate-950/50 backdrop-blur-sm animate-fade-in"
         onClick={onClose}
       />
-      <div className="relative flex flex-col bg-white dark:bg-slate-950 rounded-t-2xl shadow-2xl h-[92vh] overflow-hidden animate-[slide-up_0.25s_ease-out]">
+      <div className="relative flex flex-col bg-white dark:bg-slate-950 rounded-t-2xl shadow-2xl h-[92dvh] pb-[env(safe-area-inset-bottom)] overflow-hidden overscroll-contain animate-sheet-up">
         {/* Drag handle */}
         <div className="flex justify-center pt-2.5 pb-1 shrink-0">
           <div className="w-10 h-1 rounded-full bg-slate-300 dark:bg-slate-700" />

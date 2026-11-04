@@ -56,6 +56,14 @@ export default function VisualPanel({ tab, visualData, visualLoading, visualErro
       {tab !== 'mindmap' && loading && <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-5 w-5 animate-spin" />Preparing a grounded visual…</div>}
       {tab !== 'mindmap' && !loading && error && <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-center"><p className="text-sm text-rose-600 dark:text-rose-300">{error}</p><button type="button" onClick={onRetry} className="visual-download"><RefreshCw className="h-3.5 w-3.5" />Retry</button></div>}
       {tab !== 'mindmap' && !loading && !error && data && <ChartView data={data as VisualChart} />}
+      {tab !== 'mindmap' && !loading && !error && !data && (
+        <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-center text-sm text-slate-500 dark:text-slate-400">
+          <p>Generate a chart from the active chat&apos;s documents.</p>
+          <button type="button" onClick={onRegenerate} className="visual-download">
+            <RefreshCw className="h-3.5 w-3.5" />Generate chart
+          </button>
+        </div>
+      )}
   </>;
   return embedded ? (
     <aside className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden border-l border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900" aria-label="Artifacts">

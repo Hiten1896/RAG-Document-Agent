@@ -271,7 +271,7 @@ export default function MindMapPanel({
     <div
       className={embedded ? 'flex h-full min-h-0 w-full flex-col' : 'fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 p-2 sm:p-5'}
       role="dialog"
-      aria-modal="true"
+      aria-modal={!embedded}
       aria-label="Document mind map"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -335,14 +335,16 @@ export default function MindMapPanel({
                 <RefreshCw className="h-4 w-4" />
               )}
             </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
-              aria-label="Close mind map"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            {!embedded && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="inline-flex min-h-8 min-w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
+                aria-label="Close mind map"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </header>
 
@@ -404,9 +406,22 @@ export default function MindMapPanel({
                   )}
                 </>
               ) : (
-                <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Upload a document to create a grounded mind map.
-                </p>
+                <>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    {canGenerate
+                      ? 'Generate a grounded mind map from this chat’s documents.'
+                      : 'Upload a document to create a grounded mind map.'}
+                  </p>
+                  {canGenerate && (
+                    <button
+                      type="button"
+                      onClick={onRegenerate}
+                      className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+                    >
+                      Generate mind map
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}

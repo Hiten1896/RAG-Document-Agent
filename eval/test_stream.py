@@ -60,6 +60,52 @@ def _events(body):
 
 
 class QueryStreamTests(unittest.TestCase):
+    def test_stream_overview_samples_document_without_embedding_the_prompt(self):
+        session, chat = "stream-overview", "chat"
+        vector_store = FakeVectorStore()
+        chunks = [
+            f"Section {index} covers a different handbook topic."
+            for index in range(main.OVERVIEW_MAX_CHUNKS + 5)
+        ]
+        vector_store.add_texts(
+            chunks,
+            [
+                {
+                    "session_id": session,
+                    "chat_id": chat,
+                    "file_name": "handbook.pdf",
+                    "location": f"page {index + 1}",
+                    "page": index + 1,
+                    "chunk_index": index,
+                }
+                for index in range(len(chunks))
+            ],
+        )
+        embeddings = FakeEmbeddings()
+        llm = FakeStreamingLLM(
+            ("The handbook covers a range of topics.", [], "groq", "stream-test")
+        )
+        with (
+            patch.object(main, "vector_store", vector_store),
+            patch.object(main, "jina_embeddings", embeddings),
+            patch.object(main, "_llm_client", llm),
+            patch.object(main, "_llm_error", None),
+            TestClient(main.app) as client,
+        ):
+            response = client.post(
+                "/api/query/stream",
+                headers={"X-Session-Id": session, "X-Chat-Id": chat, "X-Debug": "true"},
+                json={"query": "What's inside this PDF?", "overview": True},
+            )
+
+        events = _events(response.text)
+        done = next(data for name, data in events if name == "done")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(embeddings.queries, [])
+        self.assertEqual(done["debug"]["retrieved_count"], main.OVERVIEW_MAX_CHUNKS)
+        self.assertIn("Section 0", llm.prompts[0])
+        self.assertIn("Section 16", llm.prompts[0])
+
     def test_stream_returns_grounded_tokens_final_text_and_debug(self):
         session, chat = "stream", "zorvania"
         vector_store = FakeVectorStore()
