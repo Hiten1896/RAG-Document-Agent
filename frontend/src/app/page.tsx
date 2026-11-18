@@ -1,38 +1,15 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useSyncExternalStore } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
-import Image from 'next/image';
 import Markdown from 'markdown-to-jsx';
 import {
   ingestDocument,
   queryDocument,
-  streamQueryDocument,
-  STREAMING_ENABLED,
-  generateMindMap,
-  generateVisual,
-  generateQuiz,
-  compareDocuments,
-  classifyIntent,
-  PromptAction,
   clearSession,
   SourceMetadata,
   QueryDebug,
-  MindMapResponse,
-  QueryStreamEvent,
-  QuizDifficulty,
-  QuizResponse,
-  CompareResponse,
-  VisualKind,
-  VisualResponse,
 } from '@/lib/api';
-import {
-  createMindMapImage,
-  downloadWordDocument,
-  ExportDocument,
-  ExportEntry,
-  sanitizeExportFilename,
-} from '@/lib/export';
 import {
   Send,
   FileText,
@@ -55,13 +32,20 @@ import {
   PanelLeftOpen,
   MoreHorizontal,
   Trash2,
+  ChevronLeft,
+  ChevronRight,
+  ZoomIn,
+  ZoomOut,
   RefreshCw,
   Copy,
   Check,
+  ClipboardList,
+  ShieldAlert,
+  ListChecks,
+  GitCompareArrows,
   Download,
-  Archive,
+  BookmarkCheck,
 } from 'lucide-react';
-import type { VisualStudioTab } from './VisualPanel';
 
 // react-pdf renders PDFs itself via pdf.js instead of relying on the
 // browser's built-in PDF plugin. That built-in-plugin path (a plain
@@ -99,28 +83,6 @@ const MobileFileViewer = dynamic(() => import('./MobileFileViewer'), {
   ssr: false,
 });
 
-const MindMapPanel = dynamic(() => import('./MindMapPanel'), {
-  ssr: false,
-  loading: () => (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/60 text-sm text-white">
-      Loading mind map…
-    </div>
-  ),
-});
-void MindMapPanel;
-
-const QuizPanel = dynamic(() => import('./QuizPanel'), {
-  ssr: false,
-});
-
-const ComparePanel = dynamic(() => import('./ComparePanel'), {
-  ssr: false,
-});
-
-const VisualPanel = dynamic(() => import('./VisualPanel'), {
-  ssr: false,
-});
-
 /* ───── Types ───── */
 interface Message {
   sender: 'user' | 'agent';
@@ -128,17 +90,10 @@ interface Message {
   sources?: SourceMetadata[];
   debug?: QueryDebug;
   attachedFiles?: string[];
-  followups?: string[];
-  followupsLoading?: boolean;
-  followupsError?: string;
-  streaming?: boolean;
-  interrupted?: boolean;
-  streamError?: string;
 }
 
 interface IngestedFile {
   name: string;
-  chatId: string;
   status: 'processing' | 'completed' | 'failed';
   pages?: number;
   chunks?: number;
@@ -156,215 +111,12 @@ interface Conversation {
   titleGenerated?: boolean;
 }
 
-type GeneratedArtifactKind = 'mindmap' | 'chart' | 'quiz' | 'compare';
-
-interface GeneratedArtifact {
+interface SavedArtifact {
   id: string;
-  conversationId: string;
   title: string;
-  kind: GeneratedArtifactKind;
-  data: MindMapResponse | VisualResponse | QuizResponse | CompareResponse;
+  text: string;
   createdAt: string;
 }
-
-function ArtifactPanel({
-  artifacts,
-  onOpen,
-  onClose,
-}: {
-  artifacts: GeneratedArtifact[];
-  onOpen: (artifact: GeneratedArtifact) => void;
-  onClose: () => void;
-}) {
-  return (
-    <aside className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-y-auto border-l border-slate-200 bg-white dark:border-slate-800/80 dark:bg-slate-900/95" aria-label="Artifacts">
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5 dark:border-slate-800/80">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-medium text-slate-800 dark:text-slate-200">Artifacts</h2>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 rounded-lg p-1.5 text-slate-500 transition hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
-          aria-label="Close artifacts"
-          title="Close"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </header>
-      {artifacts.length === 0 ? (
-        <p className="p-4 text-sm text-slate-500 dark:text-slate-400">
-          Generated mind maps, charts, quizzes, and comparisons will appear here.
-        </p>
-      ) : (
-        <div className="space-y-2 p-4">
-          {artifacts.map((artifact) => (
-            <button
-              key={artifact.id}
-              type="button"
-              onClick={() => onOpen(artifact)}
-              className="w-full rounded-xl border border-slate-200 px-3 py-3 text-left transition hover:border-indigo-300 hover:bg-indigo-50/60 dark:border-slate-700 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-950/30"
-            >
-              <span className="block text-sm font-medium text-slate-700 dark:text-slate-200">{artifact.title}</span>
-              <span className="mt-1 block text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500">{artifact.kind}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </aside>
-  );
-}
-
-type ExportFormat = 'pdf' | 'docx';
-
-function normalizePrompt(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-const INTENT_PATTERNS: Array<{
-  action: PromptAction;
-  weight: number;
-  patterns: RegExp[];
-}> = [
-  {
-    action: 'mindmap',
-    weight: 5,
-    patterns: [/\bmind\s*map\b/, /\bmindmap\b/, /\bmindmapp\b/, /\bmind\s*max\b/, /\bmap\s+the\s+(document|topic|content)\b/],
-  },
-  {
-    action: 'chart',
-    weight: 5,
-    patterns: [/\b(chart|charts|chrat|char)\b/, /\bvisuali[sz]e\b/, /\bplot\b/, /\bgraph\b/],
-  },
-  {
-    action: 'quiz',
-    weight: 5,
-    patterns: [/\b(quiz|quize|quizz|questionnaire|test\s+me)\b/, /\bask\s+me\s+questions\b/],
-  },
-  {
-    action: 'compare',
-    weight: 6,
-    patterns: [/\b(compare|compar|comparison)\b/, /\b(compare|contrast)\s+(them|these|the\s+two)\b/, /\b(difference|differences)\s+between\b/],
-  },
-  {
-    action: 'summary',
-    weight: 4,
-    patterns: [/\b(summary|summarize|summrise|summry|executive\s+summary)\b/, /\btl\s*dr\b/, /\bkey\s+takeaways?\b/],
-  },
-  {
-    action: 'action_items',
-    weight: 4,
-    patterns: [/\b(action\s*items?|actions?|tasks?|todo|to\s*dos?)\b/, /\bwhat\s+(should|needs\s+to)\s+be\s+done\b/],
-  },
-  {
-    action: 'risks',
-    weight: 4,
-    patterns: [/\b(risks?|caveats?|limitations?|concerns?|red\s+flags?)\b/],
-  },
-  {
-    action: 'terms',
-    weight: 4,
-    patterns: [/\b(terms?|glossary|definitions?|concepts?)\b/, /\bexplain\s+the\s+(key\s+)?terms\b/],
-  },
-];
-
-function promptAction(value: string): PromptAction | null {
-  const prompt = normalizePrompt(value);
-  let best: { action: PromptAction; score: number } | null = null;
-  for (const intent of INTENT_PATTERNS) {
-    const matches = intent.patterns.filter((pattern) => pattern.test(prompt)).length;
-    if (!matches) continue;
-    const score = intent.weight + matches - (intent.patterns.length > 2 ? 0.1 : 0);
-    if (!best || score > best.score) best = { action: intent.action, score };
-  }
-  return best?.action ?? null;
-}
-
-function promptTopic(value: string, action: 'mindmap' | 'chart'): string {
-  return normalizePrompt(value)
-    .replace(/^(please|can you|could you|would you)\s+/, '')
-    .replace(/^(make|create|generate|show|give|draw|build|prepare|do|run)\s+/, '')
-    .replace(
-      action === 'mindmap'
-        ? /\bmind\s*map\b|\bmindmap\b|\bmindmapp\b|\bmind\s*max\b/
-        : /\bcharts?\b|\bchrat\b|\bchar\b/,
-      '',
-    )
-    .replace(/\b(for me|please|from the documents?|of the documents?|them|these)\b/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-const COMMAND_PROMPTS: Record<Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>, string> = {
-  summary: 'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
-  action_items: 'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
-  risks: 'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
-  terms: 'Create a concise glossary of important terms and concepts from the uploaded documents. Explain each in plain language and cite the supporting page or location.',
-};
-
-interface ExportMenuProps {
-  label: string;
-  disabled?: boolean;
-  onExport: (format: ExportFormat) => void;
-}
-
-function ExportMenu({ label, disabled = false, onExport }: ExportMenuProps) {
-  const chooseFormat = (
-    event: React.MouseEvent<HTMLButtonElement>,
-    format: ExportFormat,
-  ) => {
-    event.currentTarget.closest('details')?.removeAttribute('open');
-    onExport(format);
-  };
-
-  return (
-    <details className="group/export relative">
-      <summary
-        aria-label={label}
-        className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-indigo-500/50 dark:hover:text-indigo-300"
-      >
-        <Download className="h-3.5 w-3.5" />
-        {label}
-      </summary>
-      <div className="absolute bottom-full left-0 z-30 mb-1 min-w-32 rounded-xl border border-slate-200 bg-white p-1 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={(event) => chooseFormat(event, 'pdf')}
-          className="block w-full rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          Save as PDF
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={(event) => chooseFormat(event, 'docx')}
-          className="block w-full rounded-lg px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
-        >
-          Save as Word
-        </button>
-      </div>
-    </details>
-  );
-}
-
-interface SpeechRecognitionLike {
-  continuous: boolean;
-  lang: string;
-  interimResults: boolean;
-  maxAlternatives: number;
-  onresult: ((event: { results: SpeechRecognitionResultList }) => void) | null;
-  onend: (() => void) | null;
-  onerror: ((event: { error: string }) => void) | null;
-  start: () => void;
-  stop: () => void;
-}
-
-type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
 
 // Session-only: kept in memory for the tab's lifetime, not persisted to
 // localStorage/sessionStorage, so a reload starts fresh by design.
@@ -375,20 +127,6 @@ function makeConversationId(): string {
 function titleFromQuery(text: string): string {
   const trimmed = text.trim();
   return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed || 'New Chat';
-}
-
-function subscribeToTheme(onChange: () => void): () => void {
-  const observer = new MutationObserver(onChange);
-  observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-  return () => observer.disconnect();
-}
-
-function getThemeSnapshot(): 'dark' | 'light' {
-  return document.documentElement.classList.contains('light') ? 'light' : 'dark';
-}
-
-function getServerThemeSnapshot(): 'dark' {
-  return 'dark';
 }
 
 // Formats the backend accepts. Kept next to titleFromQuery so the upload filter
@@ -412,82 +150,37 @@ const SUPPORTED_UPLOAD_ACCEPT = [
   ...SUPPORTED_UPLOAD_EXTENSIONS,
 ].join(',');
 
-const GREETINGS: Record<
-  'morning' | 'afternoon' | 'evening' | 'night',
-  { headline: string; subtext: string }[]
-> = {
-  morning: [
-    { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
-    { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
-    { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
-    { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
-    { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
-  ],
-  afternoon: [
-    { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or charts.' },
-    { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
-    { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
-    { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
-    { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
-  ],
-  evening: [
-    { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
-    { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
-    { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
-    { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
-    { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and charts included.' },
-  ],
-  night: [
-    { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
-    { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
-    { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
-    { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
-    { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
-  ],
-};
+const ANALYSIS_PRESETS = [
+  {
+    label: 'Executive summary',
+    hint: 'The main ideas and conclusions',
+    prompt:
+      'Create an executive summary of the uploaded documents. Cover the purpose, three to five key findings, and the most important conclusion. Use concise headings and cite the supporting pages or locations.',
+    icon: ClipboardList,
+  },
+  {
+    label: 'Key risks',
+    hint: 'Issues, caveats, and exposure',
+    prompt:
+      'Identify the key risks, limitations, or unresolved issues in the uploaded documents. For each one, explain why it matters, quote or paraphrase the evidence, and cite the supporting page or location. Do not invent risks that are not supported by the documents.',
+    icon: ShieldAlert,
+  },
+  {
+    label: 'Action items',
+    hint: 'Tasks, owners, and deadlines',
+    prompt:
+      'Extract every concrete action item from the uploaded documents. Present a table with action, responsible person or team if stated, deadline if stated, and supporting page or location. Mark unstated values as Not specified.',
+    icon: ListChecks,
+  },
+  {
+    label: 'Compare documents',
+    hint: 'Agreements and differences',
+    prompt:
+      'Compare the uploaded documents. Summarize the main points they share, the material differences or contradictions, and any decision a reader should make because of those differences. Cite each comparison with the relevant document and page or location.',
+    icon: GitCompareArrows,
+  },
+];
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function linkInlineCitations(answer: string, sources: SourceMetadata[]): string {
-  const fileNames = [...new Set(sources.map((source) => source.source).filter(Boolean))]
-    .sort((left, right) => (right?.length ?? 0) - (left?.length ?? 0))
-    .filter((name): name is string => Boolean(name));
-  if (!fileNames.length) return answer;
-
-  const pattern = new RegExp(
-    `(${fileNames.map(escapeRegExp).join('|')})(?:\\s*[,;–—-]?\\s*(?:page|p\\.?|slide|sheet)\\s*([\\w-]+))?`,
-    'gi',
-  );
-  return answer.replace(pattern, (match, fileName: string, locationToken?: string) => {
-    const sameFileSources = sources.filter(
-      (source) => source.source?.toLowerCase() === fileName.toLowerCase(),
-    );
-    const selectedSource = locationToken
-      ? sameFileSources.find(
-          (source) =>
-            String(source.page ?? '').toLowerCase() === locationToken.toLowerCase() ||
-            source.location?.toLowerCase().endsWith(locationToken.toLowerCase()),
-        ) ?? sameFileSources[0]
-      : sameFileSources[0];
-    if (!selectedSource) return match;
-    const sourceIndex = sources.indexOf(selectedSource);
-    if (sourceIndex < 0) return match;
-    return `[${match.replace(/([\\[\]])/g, '\\$1')}](docagent-citation:${sourceIndex})`;
-  });
-}
-
-function getSourceExcerpt(
-  debug: QueryDebug | undefined,
-  source: SourceMetadata,
-): string | undefined {
-  return debug?.chunks.find(
-    (chunk) =>
-      chunk.source === source.source &&
-      (source.page ? chunk.page === source.page : chunk.location === source.location),
-  )?.text;
-}
 
 /* ───── Brand mark ─────
    An open document with a spark of insight rising from the page — reads at
@@ -528,18 +221,14 @@ function getErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === 'string' && err.trim()) return err;
   if (err && typeof err === 'object') {
-    const error = err as { detail?: unknown; message?: unknown; retry_after?: unknown };
-    const maybeMessage = error.message;
+    const maybeDetail = (err as { detail?: unknown }).detail;
+    if (typeof maybeDetail === 'string' && maybeDetail.trim()) return maybeDetail;
+    const maybeMessage = (err as { message?: unknown }).message;
     if (typeof maybeMessage === 'string' && maybeMessage.trim()) return maybeMessage;
-    if (typeof error.retry_after === 'number' && error.retry_after > 0) {
-      return `Busy, try again in ${Math.max(1, Math.round(error.retry_after))} s`;
-    }
-    const maybeDetail = error.detail;
-    if (maybeDetail && typeof maybeDetail === 'object') {
-      const detailMessage = (maybeDetail as { message?: unknown }).message;
-      if (typeof detailMessage === 'string' && detailMessage.trim()) return detailMessage;
-    } else if (typeof maybeDetail === 'string' && maybeDetail.trim()) {
-      return maybeDetail;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return fallback;
     }
   }
   return fallback;
@@ -690,7 +379,7 @@ function ChatComposer({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Ask about text, tables, or charts..."
+            placeholder="Ask about text, tables, or diagrams..."
             className={`w-full bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl sm:rounded-2xl pl-4 pr-12 sm:pl-5 sm:pr-12 py-3 sm:py-3.5 text-base sm:text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition placeholder:text-slate-400 dark:placeholder:text-slate-500 ${
               floating ? 'shadow-md' : 'shadow-inner'
             }`}
@@ -730,6 +419,7 @@ function ChatComposer({
 export default function Home() {
   /* Upload state — multiple files can now be ingested and queried together */
   const [ingestedFiles, setIngestedFiles] = useState<IngestedFile[]>([]);
+  const [uploading, setUploading] = useState(false);
 
   /* Chat history — session-only (kept in memory, never persisted), so a
      reload intentionally starts clean. Each conversation is independent;
@@ -789,112 +479,11 @@ export default function Home() {
   const [viewerFile, setViewerFile] = useState<string | null>(null);
   const [viewerUrl, setViewerUrl] = useState<string | null>(null);
   const [viewerPage, setViewerPage] = useState<number | null>(null);
-  const [viewerLocation, setViewerLocation] = useState<string | null>(null);
-  const [viewerText, setViewerText] = useState<string | null>(null);
-  const [visualStudioOpen, setVisualStudioOpen] = useState(false);
-  const [sidePanelKind, setSidePanelKind] = useState<'visual' | 'quiz' | 'compare' | 'artifacts'>('visual');
-  const [, setArtifactsOpen] = useState(false);
-  const [generatedArtifacts, setGeneratedArtifacts] = useState<GeneratedArtifact[]>([]);
-  const [visualStudioTab, setVisualStudioTab] = useState<VisualStudioTab>('mindmap');
-  const [mindMapData, setMindMapData] = useState<MindMapResponse | null>(null);
-  const [mindMapLoading, setMindMapLoading] = useState(false);
-  const [mindMapError, setMindMapError] = useState<string | null>(null);
-  const [mindMapTopic, setMindMapTopic] = useState('');
-  const [mindMapConversationId, setMindMapConversationId] = useState(activeConversationId);
-  const [visualCache, setVisualCache] = useState<Partial<Record<VisualKind, VisualResponse | null>>>({});
-  const [visualCacheConversationId, setVisualCacheConversationId] = useState(activeConversationId);
-  const [visualLoading, setVisualLoading] = useState(false);
-  const [visualError, setVisualError] = useState<string | null>(null);
-  const [quizOpen, setQuizOpen] = useState(false);
-  const [quizData, setQuizData] = useState<QuizResponse | null>(null);
-  const [quizLoading, setQuizLoading] = useState(false);
-  const [quizError, setQuizError] = useState<string | null>(null);
-  const [quizConversationId, setQuizConversationId] = useState(activeConversationId);
-  const [quizPanelVersion, setQuizPanelVersion] = useState(0);
-  const quizRequestIdRef = useRef(0);
-  const mindMapRequestRef = useRef(false);
-  const visualRequestRef = useRef(false);
-  const ingestionPromisesRef = useRef(new Map<string, Promise<boolean>>());
-  const ingestedFilesRef = useRef(ingestedFiles);
-  useEffect(() => {
-    ingestedFilesRef.current = ingestedFiles;
-  }, [ingestedFiles]);
-  const [compareOpen, setCompareOpen] = useState(false);
-  const [compareData, setCompareData] = useState<CompareResponse | null>(null);
-  const [compareLoading, setCompareLoading] = useState(false);
-  const [compareError, setCompareError] = useState<string | null>(null);
-  const [compareConversationId, setCompareConversationId] =
-    useState(activeConversationId);
-  const compareRequestIdRef = useRef(0);
-
-  const closeFileViewer = useCallback(() => {
-    setViewerFile(null);
-    setViewerPage(null);
-    setViewerLocation(null);
-    setViewerText(null);
-    setViewerUrl((prevUrl) => {
-      if (prevUrl) URL.revokeObjectURL(prevUrl);
-      return null;
-    });
-  }, []);
-
-  const saveGeneratedArtifact = useCallback((artifact: Omit<GeneratedArtifact, 'id' | 'createdAt' | 'conversationId'>) => {
-    const nextArtifact: GeneratedArtifact = {
-      ...artifact,
-      conversationId: activeConversationId,
-      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      createdAt: new Date().toISOString(),
-    };
-    setGeneratedArtifacts((previous) => {
-      return [nextArtifact, ...previous].slice(0, 20);
-    });
-  }, [activeConversationId]);
-
-  const openGeneratedArtifact = useCallback((artifact: GeneratedArtifact) => {
-    closeFileViewer();
-    setArtifactsOpen(false);
-    setQuizOpen(false);
-    setCompareOpen(false);
-    setVisualStudioOpen(true);
-    if (artifact.kind === 'mindmap') {
-      setMindMapData(artifact.data as MindMapResponse);
-      setMindMapConversationId(activeConversationId);
-      setSidePanelKind('visual');
-      setVisualStudioTab('mindmap');
-    } else if (artifact.kind === 'chart') {
-      setVisualCache({ chart: artifact.data as VisualResponse });
-      setVisualCacheConversationId(activeConversationId);
-      setSidePanelKind('visual');
-      setVisualStudioTab('chart');
-    } else if (artifact.kind === 'quiz') {
-      setQuizData(artifact.data as QuizResponse);
-      setQuizConversationId(activeConversationId);
-      setQuizOpen(true);
-      setSidePanelKind('quiz');
-    } else if (artifact.kind === 'compare') {
-      setCompareData(artifact.data as CompareResponse);
-      setCompareConversationId(activeConversationId);
-      setCompareOpen(true);
-      setSidePanelKind('compare');
-    }
-  }, [activeConversationId, closeFileViewer]);
 
   const openFileViewer = useCallback(
-    (fname: string, page?: number, location?: string, excerpt?: string) => {
-      const match = ingestedFiles.find(
-        (f) =>
-          f.chatId === activeConversationId &&
-          f.name === fname &&
-          f.file,
-      );
+    (fname: string, page?: number) => {
+      const match = ingestedFiles.find((f) => f.name === fname && f.file);
       if (!match?.file) return;
-      setVisualStudioOpen(false);
-      setQuizOpen(false);
-      setCompareOpen(false);
-      setArtifactsOpen(false);
-      setViewerPage(page ?? null);
-      setViewerLocation(location ?? null);
-      setViewerText(excerpt ?? null);
       // Re-opening the file that's already showing used to still mint a new
       // blob URL every time this ran. PdfPreview resets pageNumber/zoom/
       // loadError whenever `fileUrl` changes, so a fresh URL for the same
@@ -902,6 +491,7 @@ export default function Home() {
       // the "flickers, then normal once touched" symptom. Only the page
       // number needs to move when it's the same file already open.
       if (fname === viewerFile) {
+        setViewerPage(page ?? null);
         return;
       }
       // react-pdf can only render actual PDFs. For every other supported
@@ -915,6 +505,7 @@ export default function Home() {
           return null;
         });
         setViewerFile(fname);
+        setViewerPage(page ?? null);
         return;
       }
       const url = URL.createObjectURL(match.file);
@@ -923,9 +514,19 @@ export default function Home() {
         return url;
       });
       setViewerFile(fname);
+      setViewerPage(page ?? null);
     },
-    [activeConversationId, ingestedFiles, viewerFile]
+    [ingestedFiles, viewerFile]
   );
+
+  const closeFileViewer = useCallback(() => {
+    setViewerFile(null);
+    setViewerPage(null);
+    setViewerUrl((prevUrl) => {
+      if (prevUrl) URL.revokeObjectURL(prevUrl);
+      return null;
+    });
+  }, []);
 
   // Release the object URL when the component unmounts so the blob isn't
   // held in memory after the panel is gone for good.
@@ -951,39 +552,87 @@ export default function Home() {
     };
   }, [viewerFile]);
 
+  /* Empty-state greeting — must NOT be computed during the initial render.
+     `new Date().getHours()` differs between the server's clock (SSR) and
+     the browser's local clock, so computing it eagerly produces two
+     different strings — the server's version flashes, then snaps to the
+     client's on hydration. Instead it starts empty and is set once in an
+     effect, which only ever runs client-side, so there's exactly one
+     render of it and no mismatch.
+
+     Four real periods (morning / afternoon / evening / night), each with
+     five headline + subtext pairs. Picked in a fixed round-robin order
+     (not random) so consecutive visits within the same period never repeat
+     the same line back-to-back — the next index per period is remembered
+     in localStorage across reloads/sessions. */
+  const GREETINGS: Record<'morning' | 'afternoon' | 'evening' | 'night', { headline: string; subtext: string }[]> = {
+    morning: [
+      { headline: 'Good morning.', subtext: 'Add a document to get started, or ask me about something you\u2019ve already shared.' },
+      { headline: 'Morning — coffee first, or straight to it?', subtext: 'Either way, drop a file in whenever you\u2019re ready and I\u2019ll dig through it.' },
+      { headline: 'Rise and shine.', subtext: 'A report, a contract, a slide deck — bring it over and let\u2019s see what\u2019s in it.' },
+      { headline: 'First thing on the list?', subtext: 'Upload something new, or pick up a thread from a document already here.' },
+      { headline: 'Fresh start.', subtext: 'I can pull specifics out of tables, pages, or slides — just point me at a file.' },
+    ],
+    afternoon: [
+      { headline: 'Good afternoon.', subtext: 'Send over a document and ask me anything about it — text, tables, or diagrams.' },
+      { headline: 'Midday check-in — what are we digging into?', subtext: 'Pick up an earlier document or bring a new one.' },
+      { headline: 'Afternoon.', subtext: 'Ask me anything about a file you\u2019ve shared, or hand me a new one to work through.' },
+      { headline: 'Back at it?', subtext: 'A document, a question — I\u2019ll go find the answer in there.' },
+      { headline: 'Let\u2019s make some progress.', subtext: 'Drop in a file and tell me what you\u2019re trying to figure out.' },
+    ],
+    evening: [
+      { headline: 'Good evening.', subtext: 'Something to review before the day wraps up? Send it over.' },
+      { headline: 'Evening.', subtext: 'Upload a document or keep going on one already here — whichever works.' },
+      { headline: 'Winding down, or just getting started?', subtext: 'Either way, I\u2019m ready when a file comes in.' },
+      { headline: 'One more thing before you\u2019re done for the day?', subtext: 'Hand it over and I\u2019ll get you the answer.' },
+      { headline: 'Evening — what\u2019s on your desk?', subtext: 'Bring a document and ask away, tables and diagrams included.' },
+    ],
+    night: [
+      { headline: 'Still up?', subtext: 'No judgment — send over whatever you\u2019re working through.' },
+      { headline: 'Burning the midnight oil.', subtext: 'A document, a deadline, or both — I\u2019m here either way.' },
+      { headline: 'Late one, huh?', subtext: 'Let\u2019s knock it out. Drop the file in and ask your question.' },
+      { headline: 'Quiet hours, better focus.', subtext: 'Share what you\u2019re looking at and I\u2019ll get straight to it.' },
+      { headline: 'Working past midnight?', subtext: 'Bring the document — I don\u2019t need sleep, so take your time.' },
+    ],
+  };
+
   const [greeting, setGreeting] = useState('');
   const [greetingSubtext, setGreetingSubtext] = useState(
     'Add a document to get started, or ask me about something you\u2019ve already shared.'
   );
 
   useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const hour = new Date().getHours();
-      const period: keyof typeof GREETINGS =
-        hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
-      const pool = GREETINGS[period];
-      const storageKey = `docagent_greeting_idx_${period}`;
-      let nextIndex = 0;
-      try {
-        const stored = window.localStorage.getItem(storageKey);
-        const parsed = stored !== null ? parseInt(stored, 10) : -1;
-        nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
-        window.localStorage.setItem(storageKey, String(nextIndex));
-      } catch {
-        nextIndex = 0;
-      }
+    const hour = new Date().getHours();
+    // morning 4–12, afternoon 12–16, evening 16–20, night 20–4 (wraps past midnight)
+    const period: keyof typeof GREETINGS =
+      hour < 4 || hour >= 20 ? 'night' : hour < 12 ? 'morning' : hour < 16 ? 'afternoon' : 'evening';
+    const pool = GREETINGS[period];
 
-      const pick = pool[nextIndex];
-      setGreeting(pick.headline);
-      setGreetingSubtext(pick.subtext);
-    });
-    return () => window.cancelAnimationFrame(frame);
+    // Sequential, not random: read the last-used index for this period from
+    // localStorage, advance it by one (wrapping around), and persist it —
+    // so the very next visit during the same period is guaranteed to be a
+    // different line, cycling through all five before any repeat.
+    const storageKey = `docagent_greeting_idx_${period}`;
+    let nextIndex = 0;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      const parsed = stored !== null ? parseInt(stored, 10) : -1;
+      nextIndex = Number.isFinite(parsed) ? (parsed + 1) % pool.length : 0;
+      window.localStorage.setItem(storageKey, String(nextIndex));
+    } catch {
+      // localStorage unavailable (private browsing, etc.) — fall back to
+      // the first line in the period rather than breaking the greeting.
+      nextIndex = 0;
+    }
+
+    const pick = pool[nextIndex];
+    setGreeting(pick.headline);
+    setGreetingSubtext(pick.subtext);
   }, []);
 
   /* Chat state */
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(false);
-  const [streaming, setStreaming] = useState(false);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [openEvidence, setOpenEvidence] = useState<Set<string>>(new Set());
@@ -1025,9 +674,8 @@ export default function Home() {
      same idea as Claude's own side panel. Persists only for the session.
      Dragging below MIN_VIEWER_WIDTH closes the panel outright (like
      dragging a native panel shut) instead of getting stuck at a floor. */
-  const MIN_VIEWER_WIDTH = 360;
-  const MAX_VIEWER_WIDTH = 560;
-  const COLLAPSED_SIDEBAR_EXTRA_WIDTH = 80;
+  const MIN_VIEWER_WIDTH = 320;
+  const CLOSE_DRAG_THRESHOLD = 220; // drag narrower than this to dismiss
   const [viewerWidth, setViewerWidth] = useState(440);
   const viewerResizingRef = useRef(false);
 
@@ -1044,13 +692,7 @@ export default function Home() {
       // Panel is on the right edge of the window, so its width is the
       // distance from the cursor to the right edge of the viewport.
       const next = window.innerWidth - e.clientX;
-      const requestedWidth = desktopSidebarOpen
-        ? next
-        : next - COLLAPSED_SIDEBAR_EXTRA_WIDTH;
-      const clamped = Math.min(
-        Math.max(requestedWidth, MIN_VIEWER_WIDTH),
-        Math.min(MAX_VIEWER_WIDTH, Math.round(window.innerWidth * 0.48)),
-      );
+      const clamped = Math.min(Math.max(next, CLOSE_DRAG_THRESHOLD), Math.round(window.innerWidth * 0.7));
       setViewerWidth(clamped);
     };
     const onUp = (e: MouseEvent) => {
@@ -1060,22 +702,13 @@ export default function Home() {
       document.body.style.userSelect = '';
 
       const next = window.innerWidth - e.clientX;
-      const requestedWidth = desktopSidebarOpen
-        ? next
-        : next - COLLAPSED_SIDEBAR_EXTRA_WIDTH;
-      if (requestedWidth < MIN_VIEWER_WIDTH && !visualStudioOpen) {
+      if (next < MIN_VIEWER_WIDTH) {
         // Dragged shut — close the panel and reset to the default width so
         // the next open isn't stuck at whatever tiny size it was dragged to.
         closeFileViewer();
         setViewerWidth(440);
       } else {
-        const requestedWidth = desktopSidebarOpen
-          ? next
-          : next - COLLAPSED_SIDEBAR_EXTRA_WIDTH;
-        setViewerWidth(Math.min(
-          Math.max(requestedWidth, MIN_VIEWER_WIDTH),
-          Math.min(MAX_VIEWER_WIDTH, Math.round(window.innerWidth * 0.48)),
-        ));
+        setViewerWidth(Math.min(next, Math.round(window.innerWidth * 0.7)));
       }
     };
     window.addEventListener('mousemove', onMove);
@@ -1084,14 +717,10 @@ export default function Home() {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [closeFileViewer, desktopSidebarOpen, visualStudioOpen]);
+  }, [closeFileViewer]);
 
   /* Theme state */
-  const theme = useSyncExternalStore(
-    subscribeToTheme,
-    getThemeSnapshot,
-    getServerThemeSnapshot
-  );
+  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   const applyTheme = (targetTheme: 'dark' | 'light') => {
     const root = document.documentElement;
@@ -1106,6 +735,15 @@ export default function Home() {
     }
   };
 
+  // The inline script in layout.tsx already put the right class on <html> before
+  // first paint. This only syncs React state to that, so the toggle icon matches
+  // what's on screen — it must not re-derive or re-apply the theme, which is
+  // what previously forced the whole app to stay `invisible` until hydration.
+  useEffect(() => {
+    const root = document.documentElement;
+    setTheme(root.classList.contains('light') ? 'light' : 'dark');
+  }, []);
+
   // The OS theme can change while the page is open. Follow it only while the
   // user has not pinned a choice of their own.
   useEffect(() => {
@@ -1119,6 +757,7 @@ export default function Home() {
         // localStorage unavailable — fall through and follow the system
       }
       const next = event.matches ? 'light' : 'dark';
+      setTheme(next);
       applyTheme(next);
     };
 
@@ -1132,6 +771,7 @@ export default function Home() {
       e.stopPropagation();
     }
     const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
     applyTheme(nextTheme);
 
     try {
@@ -1144,7 +784,7 @@ export default function Home() {
   /* Voice search setup */
   const [listening, setListening] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
-  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     return () => {
@@ -1171,12 +811,8 @@ export default function Home() {
     }
 
     if (typeof window === 'undefined') return;
-    const speechWindow = window as Window & {
-      SpeechRecognition?: SpeechRecognitionConstructor;
-      webkitSpeechRecognition?: SpeechRecognitionConstructor;
-    };
     const SpeechRecognitionCtor =
-      speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition;
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognitionCtor) {
       setMicError('Voice search is not supported in this browser.');
@@ -1201,8 +837,8 @@ export default function Home() {
       recognition.interimResults = false;
       recognition.maxAlternatives = 1;
 
-      recognition.onresult = (event) => {
-        const transcript = event.results[0]?.[0]?.transcript ?? '';
+      recognition.onresult = (event: any) => {
+        const transcript: string = event?.results?.[0]?.[0]?.transcript ?? '';
         if (transcript.trim()) {
           setQuery(transcript.trim());
         }
@@ -1212,7 +848,7 @@ export default function Home() {
         setListening(false);
       };
 
-      recognition.onerror = (event) => {
+      recognition.onerror = (event: any) => {
         setListening(false);
         const code = event?.error;
         if (code === 'not-allowed' || code === 'service-not-allowed') {
@@ -1234,27 +870,21 @@ export default function Home() {
 
   /* Refs */
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const streamControllerRef = useRef<AbortController | null>(null);
-  // Per-file tokens let parallel uploads complete independently while still
-  // making a newer retry supersede an older request for the same file.
-  const pollTokenRef = useRef(new Map<string, number>());
+  // Bumped on unmount and on retry so a resolving ingest can't setState on an
+  // unmounted tree or overwrite the result of a newer attempt.
+  const pollTokenRef = useRef(0);
 
   useEffect(() => {
-    const requestTokens = pollTokenRef.current;
     return () => {
-      requestTokens.clear();
+      pollTokenRef.current++;
     };
   }, []);
 
   /* Auto-scroll */
   useEffect(() => {
-    if (shouldAutoScrollRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: streaming ? 'auto' : 'smooth' });
-    }
-  }, [messages, loading, streaming]);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
 
   /* Backend health check */
   useEffect(() => {
@@ -1314,7 +944,7 @@ export default function Home() {
     setDragOver(false);
   }, []);
 
-  const onDrop = async (e: React.DragEvent) => {
+  const onDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragOver(false);
@@ -1323,12 +953,12 @@ export default function Home() {
     if (droppedFiles.length) {
       await ingestMultiple(droppedFiles);
     }
-  };
+  }, []);
 
   /* Ingestion — fires all files off in parallel; each tracks its own status
      entry in ingestedFiles, shown as a file card (loading/success/failed),
      so one file failing doesn't hide another's progress or overwrite its result. */
-  async function ingestMultiple(files: File[]) {
+  const ingestMultiple = async (files: File[]) => {
     // Previously filtered to `.pdf` only, so a dropped DOCX/PPTX/XLSX was
     // discarded silently — no card, no error, nothing. The backend reads all of
     // these now, and anything outside the list gets a failed card explaining why
@@ -1344,14 +974,9 @@ export default function Home() {
 
     if (rejected.length) {
       setIngestedFiles((prev) => [
-        ...prev.filter(
-          (f) =>
-            f.chatId !== activeConversationId ||
-            !rejected.some((r) => r.name === f.name),
-        ),
+        ...prev.filter((f) => !rejected.some((r) => r.name === f.name)),
         ...rejected.map((f) => ({
           name: f.name,
-          chatId: activeConversationId,
           status: 'failed' as const,
           error: `Unsupported file type. Supported: ${SUPPORTED_UPLOAD_LABEL}.`,
         })),
@@ -1362,55 +987,33 @@ export default function Home() {
     // for a failed file goes through handleRetryIngest instead, which
     // explicitly re-triggers that one file.
     const newFiles = accepted.filter((f) => {
-      const existing = ingestedFiles.find(
-        (ef) => ef.name === f.name && ef.chatId === activeConversationId,
-      );
-      return !existing || existing.status === 'failed' || existing.status === 'processing';
+      const existing = ingestedFiles.find((ef) => ef.name === f.name);
+      return !existing || existing.status === 'failed';
     });
 
     if (!newFiles.length) return;
 
     setSidebarOpen(false);
-    await Promise.all(newFiles.map((f) => {
-      const key = JSON.stringify([activeConversationId, f.name]);
-      const promise = triggerAutoIngest(f);
-      ingestionPromisesRef.current.set(key, promise);
-      promise.then(
-        () => {
-          if (ingestionPromisesRef.current.get(key) === promise) {
-            ingestionPromisesRef.current.delete(key);
-          }
-        },
-        () => {
-          if (ingestionPromisesRef.current.get(key) === promise) {
-            ingestionPromisesRef.current.delete(key);
-          }
-        },
-      );
-      return promise;
-    }));
-  }
+    setUploading(true);
+    await Promise.all(newFiles.map((f) => triggerAutoIngest(f)));
+    setUploading(false);
+  };
 
-  async function triggerAutoIngest(
-    fileToIngest: File,
-    targetChatId = activeConversationId,
-  ): Promise<boolean> {
+  const triggerAutoIngest = async (fileToIngest: File) => {
     const name = fileToIngest.name;
 
     // Guards against a stale response overwriting a newer one for the same
     // filename — a retry started while the first request is still in flight.
-    const requestKey = JSON.stringify([targetChatId, name]);
-    const requestToken = (pollTokenRef.current.get(requestKey) ?? 0) + 1;
-    pollTokenRef.current.set(requestKey, requestToken);
-    const isStale = () => pollTokenRef.current.get(requestKey) !== requestToken;
+    const requestToken = ++pollTokenRef.current;
+    const isStale = () => pollTokenRef.current !== requestToken;
 
     // Captured now: the active chat can change while the upload is in flight,
     // and the document must be indexed under the chat it was dropped into.
+    const targetChatId = activeConversationId;
+
     setIngestedFiles((prev) => [
-      ...prev.filter(
-        (f) => f.name !== name || f.chatId !== targetChatId,
-      ),
-      { name, chatId: targetChatId, status: 'processing', file: fileToIngest },
+      ...prev.filter((f) => f.name !== name),
+      { name, status: 'processing', file: fileToIngest },
     ]);
     setPendingAttachments((prev) => (prev.includes(name) ? prev : [...prev, name]));
 
@@ -1421,518 +1024,58 @@ export default function Home() {
       // "processing" until it hit the 60-attempt timeout and falsely reported
       // failure for documents that had actually been indexed correctly.
       const res = await ingestDocument(fileToIngest, targetChatId);
-      if (isStale()) return false;
+      if (isStale()) return;
 
       setIngestedFiles((prev) =>
         prev.map((f) =>
-          f.name === name && f.chatId === targetChatId
+          f.name === name
             ? { ...f, status: 'completed', pages: res.pages, chunks: res.chunks }
             : f
         )
       );
-      return true;
     } catch (err: unknown) {
-      if (isStale()) return false;
+      if (isStale()) return;
       const message = getErrorMessage(err, 'Failed to communicate with backend.');
       setIngestedFiles((prev) =>
-        prev.map((f) =>
-          f.name === name && f.chatId === targetChatId
-            ? { ...f, status: 'failed', error: message }
-            : f,
-        ),
+        prev.map((f) => (f.name === name ? { ...f, status: 'failed', error: message } : f))
       );
-      return false;
     }
-  }
+  };
 
   /* Retry — re-triggers ingestion for a failed file using the File object
      already held onto from the original upload, so the user doesn't have
      to re-pick it from disk. */
   const handleRetryIngest = (fileToRetry: IngestedFile) => {
     if (!fileToRetry.file) return;
-    const key = JSON.stringify([fileToRetry.chatId, fileToRetry.name]);
-    const promise = triggerAutoIngest(fileToRetry.file, fileToRetry.chatId);
-    ingestionPromisesRef.current.set(key, promise);
-  };
-
-  const waitForDocuments = async (
-    targetConversationId: string,
-    fileNames: string[] = [],
-  ) => {
-    const names = fileNames.length
-      ? fileNames
-      : ingestedFilesRef.current
-          .filter(
-            (file) =>
-              file.chatId === targetConversationId && file.status === 'processing',
-          )
-          .map((file) => file.name);
-    const results = await Promise.all(
-      names.map((name) =>
-        ingestionPromisesRef.current.get(
-          JSON.stringify([targetConversationId, name]),
-        ),
-      ),
-    );
-    return results.some(Boolean) || ingestedFilesRef.current.some(
-      (file) =>
-        file.chatId === targetConversationId && file.status === 'completed',
-    );
-  };
-
-  const handleGenerateMindMap = async (topic?: string, regenerate = false) => {
-    const normalizedTopic = topic?.trim() || '';
-    const targetConversationId = activeConversationId;
-    const hasCurrentMindMap = mindMapConversationId === targetConversationId;
-    if (mindMapRequestRef.current) return;
-    closeFileViewer();
-    setQuizOpen(false);
-    setCompareOpen(false);
-    setArtifactsOpen(false);
-    setVisualStudioOpen(true);
-    setSidePanelKind('visual');
-    setVisualStudioTab('mindmap');
-    setMindMapConversationId(targetConversationId);
-    setMindMapError(null);
-    setMindMapTopic(normalizedTopic);
-    if (!hasCurrentMindMap) setMindMapData(null);
-    if (!regenerate && hasCurrentMindMap && mindMapData) {
-      setMindMapLoading(false);
-      return;
-    }
-    if (regenerate) setMindMapData(null);
-
-    if (
-      !ingestedFiles.some(
-        (file) =>
-          file.chatId === targetConversationId && file.status === 'completed',
-      )
-    ) {
-      setMindMapData(null);
-      setMindMapError('Upload a document to create a grounded mind map.');
-      setMindMapLoading(false);
-      return;
-    }
-
-    setMindMapLoading(true);
-    mindMapRequestRef.current = true;
-    try {
-      const result = await generateMindMap(targetConversationId, {
-        ...(normalizedTopic ? { topic: normalizedTopic } : {}),
-        ...(regenerate ? { regenerate: true } : {}),
-      });
-      if (activeConversationId === targetConversationId) {
-        setMindMapData(result);
-        saveGeneratedArtifact({
-          title: result.title || 'Mind map',
-          kind: 'mindmap',
-          data: result,
-        });
-      }
-    } catch (err: unknown) {
-      if (activeConversationId === targetConversationId) {
-        setMindMapError(getErrorMessage(err, 'Could not generate the mind map.'));
-      }
-    } finally {
-      if (activeConversationId === targetConversationId) {
-        setMindMapLoading(false);
-      }
-      mindMapRequestRef.current = false;
-    }
-  };
-
-  const handleGenerateVisual = async (kind: VisualKind, topic = '', regenerate = false) => {
-    const targetConversationId = activeConversationId;
-    const hasCurrentCache = visualCacheConversationId === targetConversationId;
-    if (visualRequestRef.current) return;
-    closeFileViewer();
-    setQuizOpen(false);
-    setCompareOpen(false);
-    setArtifactsOpen(false);
-    setVisualStudioOpen(true);
-    setSidePanelKind('visual');
-    setVisualStudioTab(kind);
-    if (!regenerate && hasCurrentCache && visualCache[kind]) {
-      setVisualLoading(false);
-      return;
-    }
-    setVisualError(null);
-    setVisualLoading(true);
-    if (!hasCurrentCache) {
-      setVisualCache({});
-      setVisualCacheConversationId(targetConversationId);
-    }
-    if (!ingestedFiles.some((file) => file.chatId === targetConversationId && file.status === 'completed')) {
-      setVisualError('Upload a document to create a grounded visual.');
-      setVisualLoading(false);
-      return;
-    }
-    visualRequestRef.current = true;
-    try {
-      const result = await generateVisual(kind, targetConversationId, topic);
-      if (activeConversationId === targetConversationId) {
-        setVisualCache((previous) => ({ ...previous, [kind]: result }));
-        saveGeneratedArtifact({
-          title: result.title || 'Chart',
-          kind: 'chart',
-          data: result,
-        });
-      }
-    } catch (err: unknown) {
-      if (activeConversationId === targetConversationId) setVisualError(getErrorMessage(err, 'Could not generate the visual.'));
-    } finally {
-      if (activeConversationId === targetConversationId) setVisualLoading(false);
-      visualRequestRef.current = false;
-    }
-  };
-
-  const handleOpenQuiz = () => {
-    if (
-      !ingestedFiles.some(
-        (file) =>
-          file.chatId === activeConversationId && file.status === 'completed',
-      )
-    ) {
-      return;
-    }
-
-    closeFileViewer();
-    setCompareOpen(false);
-    setArtifactsOpen(false);
-    setQuizConversationId(activeConversationId);
-    quizRequestIdRef.current += 1;
-    setQuizData(null);
-    setQuizLoading(false);
-    setQuizError(null);
-    setQuizOpen(true);
-    setSidePanelKind('quiz');
-    setVisualStudioOpen(true);
-  };
-
-  const handleGenerateQuiz = async (
-    count: number,
-    difficulty: QuizDifficulty,
-  ) => {
-    const targetConversationId = activeConversationId;
-    const requestId = quizRequestIdRef.current + 1;
-    quizRequestIdRef.current = requestId;
-    setQuizConversationId(targetConversationId);
-    setQuizData(null);
-    setQuizError(null);
-    setQuizLoading(true);
-    try {
-      const result = await generateQuiz(count, difficulty, targetConversationId);
-      if (
-        quizRequestIdRef.current === requestId &&
-        activeConversationId === targetConversationId
-      ) {
-        setQuizData(result);
-        saveGeneratedArtifact({
-          title: `Quiz (${result.questions.length} questions)`,
-          kind: 'quiz',
-          data: result,
-        });
-        setQuizPanelVersion((version) => version + 1);
-      }
-    } catch (err: unknown) {
-      if (
-        quizRequestIdRef.current === requestId &&
-        activeConversationId === targetConversationId
-      ) {
-        setQuizError(getErrorMessage(err, 'Could not generate the quiz.'));
-      }
-    } finally {
-      if (quizRequestIdRef.current === requestId) {
-        setQuizLoading(false);
-      }
-    }
-  };
-
-  const handleCloseQuiz = () => {
-    quizRequestIdRef.current += 1;
-    setQuizOpen(false);
-    setQuizLoading(false);
-    setVisualStudioOpen(false);
-  };
-
-  const handleOpenCompare = () => {
-    closeFileViewer();
-    setQuizOpen(false);
-    setArtifactsOpen(false);
-    setCompareConversationId(activeConversationId);
-    compareRequestIdRef.current += 1;
-    setCompareData(null);
-    setCompareLoading(false);
-    setCompareError(null);
-    setCompareOpen(true);
-    setSidePanelKind('compare');
-    setVisualStudioOpen(true);
-  };
-
-  const handleCompareDocuments = async (
-    fileA: string,
-    fileB: string,
-    focus: string,
-  ) => {
-    const targetConversationId = activeConversationId;
-    const requestId = compareRequestIdRef.current + 1;
-    compareRequestIdRef.current = requestId;
-    setCompareConversationId(targetConversationId);
-    setCompareData(null);
-    setCompareError(null);
-    setCompareLoading(true);
-    try {
-      const result = await compareDocuments(
-        fileA,
-        fileB,
-        focus,
-        targetConversationId,
-      );
-      if (
-        compareRequestIdRef.current === requestId &&
-        activeConversationId === targetConversationId
-      ) {
-        setCompareData(result);
-        saveGeneratedArtifact({
-          title: `Compare: ${result.files[0]} vs ${result.files[1]}`,
-          kind: 'compare',
-          data: result,
-        });
-      }
-    } catch (err: unknown) {
-      if (
-        compareRequestIdRef.current === requestId &&
-        activeConversationId === targetConversationId
-      ) {
-        setCompareError(
-          getErrorMessage(err, 'Could not compare the selected documents.'),
-        );
-      }
-    } finally {
-      if (compareRequestIdRef.current === requestId) {
-        setCompareLoading(false);
-      }
-    }
-  };
-
-  const handleCloseCompare = () => {
-    compareRequestIdRef.current += 1;
-    setCompareOpen(false);
-    setCompareLoading(false);
-    setVisualStudioOpen(false);
+    triggerAutoIngest(fileToRetry.file);
   };
 
   /* Query */
-  const handleSendQuery = async (
-    e?: React.FormEvent,
-    presetQuery?: string,
-    displayQuery?: string,
-    retrievalQueryOverride?: string,
-    overviewOverride = false,
-  ) => {
+  const handleSendQuery = async (e?: React.FormEvent, presetQuery?: string) => {
     if (e) e.preventDefault();
     const requestedQuery = presetQuery ?? query;
     if (!requestedQuery.trim() || loading) return;
-    const userText = (displayQuery ?? requestedQuery).trim();
-    const targetConversationId = activeConversationId;
+
+    const userText = requestedQuery.trim();
     const attachedFiles = pendingAttachments.length ? pendingAttachments : undefined;
-
-    if (!presetQuery) {
-      setQuery('');
-      setPendingAttachments([]);
-      setMessagesForActive((prev) => [
-        ...prev,
-        { sender: 'user' as const, text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
-      ]);
-    }
-
-    // Preset prompts are already fully formed backend instructions. Re-running
-    // intent detection on them would dispatch the same command recursively.
-    let action: PromptAction | null = presetQuery ? null : promptAction(requestedQuery);
-    let classifiedTopic = '';
-    let retrievalQuery = retrievalQueryOverride ?? '';
-    let overview = overviewOverride;
-    if (!presetQuery) {
-      if (action === 'mindmap') {
-        await waitForDocuments(targetConversationId, attachedFiles);
-        await handleGenerateMindMap(promptTopic(requestedQuery, 'mindmap'));
-        return;
-      }
-      try {
-        const classified = await classifyIntent(requestedQuery, targetConversationId);
-        action = action ?? classified.action;
-        classifiedTopic = classified.topic;
-        retrievalQuery = classified.retrieval_query || '';
-        overview = classified.overview ?? false;
-      } catch {
-        // Keep the local classifier as a deterministic fallback if the
-        // optional intent call is unavailable or rate-limited.
-        overview = action === 'summary';
-      }
-    }
-    if (action === 'mindmap') {
-      await waitForDocuments(targetConversationId, attachedFiles);
-      await handleGenerateMindMap(
-        classifiedTopic || promptTopic(requestedQuery, 'mindmap'),
-      );
-      return;
-    }
-    if (action === 'chart') {
-      await waitForDocuments(targetConversationId, attachedFiles);
-      await handleGenerateVisual(
-        'chart',
-        classifiedTopic || promptTopic(requestedQuery, 'chart'),
-      );
-      return;
-    }
-    if (action === 'quiz') {
-      await waitForDocuments(targetConversationId, attachedFiles);
-      handleOpenQuiz();
-      return;
-    }
-    if (action === 'compare') {
-      await waitForDocuments(targetConversationId, attachedFiles);
-      handleOpenCompare();
-      if (attachedFiles && attachedFiles.length >= 2) {
-        await handleCompareDocuments(
-          attachedFiles[0],
-          attachedFiles[1],
-          requestedQuery,
-        );
-      }
-      return;
-    }
-    if (action && action in COMMAND_PROMPTS) {
-      await waitForDocuments(targetConversationId, attachedFiles);
-      await handleSendQuery(
-        undefined,
-        COMMAND_PROMPTS[action as Exclude<PromptAction, 'mindmap' | 'chart' | 'quiz' | 'compare'>],
-        requestedQuery,
-        retrievalQuery,
-        overview || action === 'summary',
-      );
-      setQuery('');
-      return;
-    }
-
-    const requestText = requestedQuery.trim();
-    await waitForDocuments(targetConversationId, attachedFiles);
     // Captured before the async gap below — the active conversation could
     // change while this request is in flight, and the backend filters
     // retrieval on the chat id, so the answer must come from the vectors of
     // the conversation the message was actually sent in.
-    // The original prompt is appended before command prompts are expanded, so
-    // the streamed assistant message is always the next entry.
-    const answerIndex = messages.length + 1;
+    const targetConversationId = activeConversationId;
 
-    if (presetQuery) {
-      setQuery('');
-      setPendingAttachments([]);
-    }
-    setMessagesForActive((prev) => {
-      const next = [...prev];
-      if (STREAMING_ENABLED) {
-        next.push({
-          sender: 'agent',
-          text: '',
-          sources: [],
-          streaming: true,
-        });
-      }
-      return next;
-    });
+    setQuery('');
+    setPendingAttachments([]);
+    setMessagesForActive((prev) => [
+      ...prev,
+      { sender: 'user', text: userText, ...(attachedFiles ? { attachedFiles } : {}) },
+    ]);
     setLoading(true);
-
-    if (STREAMING_ENABLED) {
-      const controller = new AbortController();
-      streamControllerRef.current = controller;
-      setStreaming(true);
-      const updateStreamMessage = (update: (message: Message) => Message) => {
-        setMessagesForActive((previous) => {
-          const current = previous[answerIndex];
-          if (!current || current.sender !== 'agent') return previous;
-          const next = [...previous];
-          next[answerIndex] = update(current);
-          return next;
-        });
-      };
-
-      try {
-        await streamQueryDocument(
-          requestText,
-          targetConversationId,
-          true,
-          controller.signal,
-          (event: QueryStreamEvent) => {
-            if (event.event === 'meta') {
-              updateStreamMessage((message) => ({
-                ...message,
-                sources: event.data.sources,
-              }));
-            } else if (event.event === 'token') {
-              updateStreamMessage((message) => ({
-                ...message,
-                text: message.text + event.data.text,
-              }));
-            } else if (event.event === 'done') {
-              updateStreamMessage((message) => ({
-                ...message,
-                text: event.data.answer,
-                sources: event.data.sources,
-                debug: event.data.debug,
-                streaming: false,
-                interrupted: false,
-                streamError: undefined,
-              }));
-            } else {
-              updateStreamMessage((message) => ({
-                ...message,
-                text: event.data.streamed
-                  ? message.text
-                  : `Error processing your request: ${event.data.message}`,
-                streaming: false,
-                interrupted: event.data.streamed,
-                streamError: event.data.message,
-              }));
-            }
-          },
-          retrievalQuery,
-          overview,
-        );
-      } catch (err: unknown) {
-        const message = getErrorMessage(err, 'Could not generate an answer.');
-        updateStreamMessage((current) => ({
-          ...current,
-          text: controller.signal.aborted
-            ? current.text || 'Request stopped.'
-            : current.text || `Error processing your request: ${message}`,
-          streaming: false,
-          interrupted: controller.signal.aborted && Boolean(current.text),
-          streamError: controller.signal.aborted
-            ? 'Answer interrupted. Retry to generate it again.'
-            : message,
-        }));
-      } finally {
-        if (streamControllerRef.current === controller) {
-          streamControllerRef.current = null;
-          setStreaming(false);
-          setLoading(false);
-        }
-      }
-      return;
-    }
 
     try {
       // No `source` filter is passed, so the backend searches across every
       // ingested document's chunks rather than restricting to one file.
-      const res = await queryDocument(
-        requestText,
-        targetConversationId,
-        4,
-        true,
-        retrievalQuery,
-        overview,
-      );
+      const res = await queryDocument(userText, targetConversationId, 4, true);
       setMessagesForActive((prev) => [
         ...prev,
         {
@@ -1951,10 +1094,6 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleStopStreaming = () => {
-    streamControllerRef.current?.abort();
   };
 
   /* Edit & Regenerate */
@@ -2071,96 +1210,52 @@ export default function Home() {
      the button icon to a checkmark for feedback, the same pattern Claude's
      own UI uses. `copiedIndex` is cleared automatically after a short delay. */
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [printExport, setPrintExport] = useState<ExportDocument | null>(null);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [savedArtifacts, setSavedArtifacts] = useState<SavedArtifact[]>([]);
 
   useEffect(() => {
-    window.localStorage.removeItem('docagent_artifacts');
-    window.localStorage.removeItem('docagent_generated_artifacts');
+    try {
+      const stored = window.localStorage.getItem('docagent_artifacts');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) setSavedArtifacts(parsed);
+      }
+    } catch {
+      // Local storage is optional; the download action still works without it.
+    }
   }, []);
 
-  useEffect(() => {
-    if (!printExport) return;
-    const previousTitle = window.document.title;
-    const restorePrintState = () => {
-      window.document.title = previousTitle;
-      setPrintExport(null);
+  const handleSaveArtifact = (index: number, message: Message) => {
+    if (message.sender !== 'agent') return;
+    const title = `Document brief ${new Date().toLocaleDateString()}`;
+    const sourceLines = (message.sources ?? []).map((source) => {
+      const location = source.page ? `page ${source.page}` : source.location || 'document';
+      return `- ${source.source || 'Document'} (${location})`;
+    });
+    const markdown = `# ${title}\n\n${message.text}${sourceLines.length ? `\n\n## Sources\n\n${sourceLines.join('\n')}` : ''}\n`;
+    const artifact: SavedArtifact = {
+      id: `${Date.now()}_${index}`,
+      title,
+      text: markdown,
+      createdAt: new Date().toISOString(),
     };
-    window.document.title = printExport.fileName;
-    window.addEventListener('afterprint', restorePrintState, { once: true });
-    const frame = window.requestAnimationFrame(() => window.print());
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener('afterprint', restorePrintState);
-      window.document.title = previousTitle;
-    };
-  }, [printExport]);
-
-  const handleExport = async (format: ExportFormat, answerIndex?: number) => {
-    const makeEntry = (
-      question: string,
-      answer: Message,
-      index: number,
-    ): ExportEntry => {
-      const evidenceIsOpen = openEvidence.has(`${activeConversationId}:${index}`);
-      return {
-        question,
-        answer: answer.text,
-        sources: answer.sources ?? [],
-        ...(evidenceIsOpen && answer.debug
-          ? { evidence: answer.debug.chunks.map((chunk) => chunk.text) }
-          : {}),
-      };
-    };
-
-    let entries: ExportEntry[];
-    if (answerIndex !== undefined) {
-      const answer = messages[answerIndex];
-      const question = messages
-        .slice(0, answerIndex)
-        .reverse()
-        .find((message) => message.sender === 'user')?.text;
-      entries =
-        answer?.sender === 'agent' && question
-          ? [makeEntry(question, answer, answerIndex)]
-          : [];
-    } else {
-      entries = [];
-      let question = '';
-      messages.forEach((message, index) => {
-        if (message.sender === 'user') {
-          question = message.text;
-        } else if (question) {
-          entries.push(makeEntry(question, message, index));
-          question = '';
-        }
-      });
-    }
-
-    if (!entries.length) {
-      setExportError('There are no answered questions to export yet.');
-      return;
-    }
-    setExportError(null);
-    const firstQuestion = entries[0].question;
-    const content: ExportDocument = {
-      title: firstQuestion,
-      fileName: sanitizeExportFilename(firstQuestion),
-      entries,
-    };
-
+    const next = [artifact, ...savedArtifacts].slice(0, 12);
+    setSavedArtifacts(next);
     try {
-      if (mindMapData && mindMapConversationId === activeConversationId) {
-        content.mindMapImage = await createMindMapImage(mindMapData);
-      }
-      if (format === 'docx') {
-        await downloadWordDocument(content);
-      } else {
-        setPrintExport(content);
-      }
-    } catch (err: unknown) {
-      setExportError(getErrorMessage(err, 'Could not create the export.'));
+      window.localStorage.setItem('docagent_artifacts', JSON.stringify(next));
+    } catch {
+      // Quota or private-browsing failures should not block the download.
     }
+    downloadArtifact(artifact);
+  };
+
+  const downloadArtifact = (artifact: SavedArtifact) => {
+    const blob = new Blob([artifact.text], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${artifact.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleCopy = async (index: number, text: string) => {
@@ -2179,10 +1274,6 @@ export default function Home() {
      history list, rather than wiping the current one. History is session-only
      by design: it lives in component state and is gone on reload. */
   const handleNewChat = () => {
-    streamControllerRef.current?.abort();
-    streamControllerRef.current = null;
-    setStreaming(false);
-    setLoading(false);
     const newConversation: Conversation = {
       id: makeConversationId(),
       title: 'New Chat',
@@ -2207,10 +1298,6 @@ export default function Home() {
 
   const handleSwitchConversation = (id: string) => {
     if (id === activeConversationId) return;
-    streamControllerRef.current?.abort();
-    streamControllerRef.current = null;
-    setStreaming(false);
-    setLoading(false);
     setActiveConversationId(id);
     setEditingIndex(null);
     setEditText('');
@@ -2271,11 +1358,10 @@ export default function Home() {
     ).map((match) => match[1]);
     return getDeduplicatedSources(sources).filter((source) => {
       const page = source.page ? String(source.page) : '';
-      const sourceName = (source.source || '').toLowerCase();
-      const sourceMentioned = Boolean(sourceName && normalizedAnswer.includes(sourceName));
       if (page && pageCitations.includes(page)) return true;
-      if (page && pageCitations.length > 0) return false;
-      return sourceMentioned;
+      if (page) return false;
+      const sourceName = (source.source || '').toLowerCase();
+      return Boolean(sourceName && normalizedAnswer.includes(sourceName));
     });
   };
 
@@ -2283,116 +1369,14 @@ export default function Home() {
     `${((milliseconds || 0) / 1000).toFixed(1)}s`;
 
   const isEmptyChat = messages.length === 0;
-  const activeChatFiles = ingestedFiles.filter(
-    (file) => file.chatId === activeConversationId,
-  );
-  const hasIndexedDocuments = activeChatFiles.some(
-    (file) => file.status === 'completed',
-  );
-  const activeGeneratedArtifacts = generatedArtifacts.filter(
-    (artifact) => artifact.conversationId === activeConversationId,
-  );
-  const isMindMapForActiveConversation =
-    mindMapConversationId === activeConversationId;
-  const isVisualForActiveConversation =
-    visualCacheConversationId === activeConversationId;
-  const isQuizForActiveConversation =
-    quizConversationId === activeConversationId;
-  const isCompareForActiveConversation =
-    compareConversationId === activeConversationId;
-  const renderSidePanel = (embedded: boolean) => {
-    if (sidePanelKind === 'artifacts') {
-      return (
-        <ArtifactPanel
-          artifacts={activeGeneratedArtifacts}
-          onOpen={openGeneratedArtifact}
-          onClose={() => {
-            setArtifactsOpen(false);
-            setVisualStudioOpen(false);
-          }}
-        />
-      );
-    }
-    if (sidePanelKind === 'visual') {
-      return (
-        <VisualPanel
-          embedded={embedded}
-          tab={visualStudioTab}
-          visualData={isVisualForActiveConversation ? visualCache : {}}
-          visualLoading={isVisualForActiveConversation && visualLoading}
-          visualError={isVisualForActiveConversation ? visualError : null}
-          mindMapData={isMindMapForActiveConversation ? mindMapData : null}
-          mindMapLoading={isMindMapForActiveConversation && mindMapLoading}
-          mindMapError={isMindMapForActiveConversation ? mindMapError : null}
-          canGenerateMindMap={hasIndexedDocuments}
-          onClose={() => setVisualStudioOpen(false)}
-          onRetry={() => {
-            if (visualStudioTab !== 'mindmap') {
-              void handleGenerateVisual(visualStudioTab, '', true);
-            }
-          }}
-          onRegenerate={() => {
-            if (visualStudioTab !== 'mindmap') {
-              void handleGenerateVisual(visualStudioTab, '', true);
-            }
-          }}
-          onMindMapRetry={() => void handleGenerateMindMap(mindMapTopic)}
-          onMindMapRegenerate={() =>
-            void handleGenerateMindMap(mindMapTopic, true)
-          }
-        />
-      );
-    }
-    if (sidePanelKind === 'quiz') {
-      return (
-        <QuizPanel
-          key={`${quizConversationId}-${quizPanelVersion}`}
-          data={isQuizForActiveConversation ? quizData : null}
-          loading={isQuizForActiveConversation && quizLoading}
-          error={isQuizForActiveConversation ? quizError : null}
-          onClose={handleCloseQuiz}
-          onGenerate={handleGenerateQuiz}
-          embedded={embedded}
-        />
-      );
-    }
-    return (
-      <ComparePanel
-        files={[
-          ...new Set(
-            activeChatFiles
-              .filter((file) => file.status === 'completed')
-              .map((file) => file.name),
-          ),
-        ]}
-        data={isCompareForActiveConversation ? compareData : null}
-        loading={isCompareForActiveConversation && compareLoading}
-        error={isCompareForActiveConversation ? compareError : null}
-        onClose={handleCloseCompare}
-        onCompare={handleCompareDocuments}
-        embedded={embedded}
-      />
-    );
-  };
-  const boundedViewerWidth = Math.min(
-    Math.max(viewerWidth, MIN_VIEWER_WIDTH),
-    MAX_VIEWER_WIDTH,
-  );
-  const sidePanelWidth = desktopSidebarOpen
-    ? boundedViewerWidth
-    : Math.min(
-        boundedViewerWidth + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
-        MAX_VIEWER_WIDTH + COLLAPSED_SIDEBAR_EXTRA_WIDTH,
-      );
+  const hasIndexedDocuments = ingestedFiles.some((file) => file.status === 'completed');
+
   return (
     // `h-screen h-[100dvh]` set the same property twice via two utilities, so
     // which one won depended on Tailwind's output order rather than intent.
     // `h-dvh` alone is what was wanted: the dynamic viewport height that
     // accounts for mobile browser chrome.
-    <div
-      id="docagent-app"
-      className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200"
-    >
+    <div className="flex h-dvh bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans antialiased overflow-hidden transition-colors duration-200">
       {/* Hidden File Input */}
       <input
         ref={fileInputRef}
@@ -2466,24 +1450,6 @@ export default function Home() {
             {/* Collapse — desktop only; mobile uses the X below via the
                 overlay drawer instead. Same base style as the theme toggle
                 above so both read at equal visual weight. */}
-            <button
-              type="button"
-              onClick={() => {
-                closeFileViewer();
-                setQuizOpen(false);
-                setCompareOpen(false);
-                setArtifactsOpen(true);
-                setVisualStudioOpen(true);
-                setSidePanelKind('artifacts');
-                setSidebarOpen(false);
-              }}
-              className="p-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition cursor-pointer relative"
-              aria-label="Open artifacts"
-              title="Open artifacts"
-            >
-              <Archive className="w-4 h-4" />
-            </button>
-
             <button
               type="button"
               onClick={() => setDesktopSidebarOpen(false)}
@@ -2599,6 +1565,31 @@ export default function Home() {
           </div>
         </div>
 
+        {savedArtifacts.length > 0 && (
+          <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800/80 min-w-[260px] shrink-0">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                Artifacts
+              </label>
+              <span className="text-[10px] text-slate-400 dark:text-slate-500">{savedArtifacts.length}</span>
+            </div>
+            <div className="space-y-1 max-h-24 overflow-y-auto">
+              {savedArtifacts.slice(0, 3).map((artifact) => (
+                <button
+                  key={artifact.id}
+                  type="button"
+                  onClick={() => downloadArtifact(artifact)}
+                  className="w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60 transition cursor-pointer"
+                  title="Download Markdown brief"
+                >
+                  <Download className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                  <span className="truncate">{artifact.title}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Backend Status Footer */}
         <div className="text-xs text-slate-500 border-t border-slate-200 dark:border-slate-800/80 pt-4 mt-4 flex items-center justify-between min-w-[260px] shrink-0">
           <span>Backend Pipeline:</span>
@@ -2655,7 +1646,7 @@ export default function Home() {
         )}
 
         {/* Mobile Top Bar */}
-        <div className="md:hidden flex items-center justify-between px-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
+        <div className="md:hidden flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/60 backdrop-blur-xl shrink-0">
           <button
             type="button"
             onClick={() => setSidebarOpen(true)}
@@ -2681,15 +1672,7 @@ export default function Home() {
         </div>
 
         {/* ── Chat messages area ── */}
-        <div
-          ref={messagesContainerRef}
-          onScroll={(event) => {
-            const element = event.currentTarget;
-            shouldAutoScrollRef.current =
-              element.scrollHeight - element.scrollTop - element.clientHeight < 100;
-          }}
-          className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}
-        >
+        <div className={`flex-1 overflow-y-auto ${isEmptyChat ? 'flex flex-col' : 'p-4 sm:p-6 lg:p-8 space-y-5 sm:space-y-6'}`}>
 
           {/* Empty state hero — a quiet, personal welcome rather than a
               feature-card grid. The greeting varies with time of day, the
@@ -2707,6 +1690,34 @@ export default function Home() {
               <p className="text-sm text-slate-500 dark:text-slate-400 max-w-sm leading-relaxed mb-8">
                 {greetingSubtext}
               </p>
+              <div className="w-full max-w-2xl px-4 mb-5 text-left">
+                <div className="flex items-center justify-between mb-2 px-1">
+                  <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                    Start with an analysis
+                  </span>
+                  {!hasIndexedDocuments && (
+                    <span className="text-[11px] text-slate-400 dark:text-slate-600">Upload a document first</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                  {ANALYSIS_PRESETS.map((preset) => {
+                    const Icon = preset.icon;
+                    return (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        disabled={!hasIndexedDocuments || loading}
+                        onClick={() => void handleSendQuery(undefined, preset.prompt)}
+                        className="min-h-[88px] rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 px-3 py-3 text-left transition hover:border-indigo-400 hover:bg-indigo-50/70 dark:hover:border-indigo-500/60 dark:hover:bg-indigo-500/10 disabled:cursor-not-allowed disabled:opacity-45"
+                      >
+                        <Icon className="w-4 h-4 text-indigo-600 dark:text-indigo-400 mb-2" />
+                        <span className="block text-xs font-semibold text-slate-800 dark:text-slate-200">{preset.label}</span>
+                        <span className="block mt-1 text-[10px] leading-snug text-slate-400 dark:text-slate-500">{preset.hint}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <div className="w-full max-w-2xl px-4">
                 <ChatComposer
                   query={query}
@@ -2718,7 +1729,7 @@ export default function Home() {
                   listening={listening}
                   pendingAttachments={pendingAttachments}
                   setPendingAttachments={setPendingAttachments}
-                  ingestedFiles={activeChatFiles}
+                  ingestedFiles={ingestedFiles}
                   handleRetryIngest={handleRetryIngest}
                   floating
                 />
@@ -2736,59 +1747,8 @@ export default function Home() {
             const isUser = msg.sender === 'user';
             const isEditing = editingIndex === index;
             const citedSources = getCitedSources(msg.text, msg.sources);
-            const displaySources =
-              msg.streaming && msg.sources?.length ? msg.sources : citedSources;
-            const markdownText = isUser
-              ? msg.text
-              : linkInlineCitations(msg.text, citedSources);
             const evidenceKey = `${activeConversationId}:${index}`;
             const evidenceIsOpen = openEvidence.has(evidenceKey);
-            const RenderMarkdownLink = (props: React.ComponentProps<'a'>) => {
-              const { href, children } = props;
-              const citationMatch =
-                typeof href === 'string' ? href.match(/^docagent-citation:(\d+)$/) : null;
-              const source = citationMatch
-                ? citedSources[Number(citationMatch[1])]
-                : undefined;
-              if (source?.source) {
-                const canOpen = activeChatFiles.some(
-                  (file) => file.name === source.source && file.file,
-                );
-                return (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      canOpen &&
-                      openFileViewer(
-                        source.source || '',
-                        source.page,
-                        source.location,
-                        getSourceExcerpt(msg.debug, source),
-                      )
-                    }
-                    disabled={!canOpen}
-                    className="text-indigo-600 underline decoration-indigo-400 underline-offset-2 dark:text-indigo-400"
-                    title={
-                      canOpen
-                        ? `Open ${source.source} at ${source.page ? `page ${source.page}` : source.location || 'the cited location'}`
-                        : source.source
-                    }
-                  >
-                    {children}
-                  </button>
-                );
-              }
-              return (
-                <a
-                  {...props}
-                  className="text-indigo-600 dark:text-indigo-400 underline"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {children}
-                </a>
-              );
-            };
 
             return (
               <div
@@ -2907,23 +1867,18 @@ export default function Home() {
                                   },
                                 },
                                 hr: { props: { className: 'my-3 border-slate-200 dark:border-slate-700' } },
-                                a: { component: RenderMarkdownLink },
+                                a: {
+                                  props: {
+                                    className: 'text-indigo-600 dark:text-indigo-400 underline',
+                                    target: '_blank',
+                                    rel: 'noopener noreferrer',
+                                  },
+                                },
                               },
                             }}
                           >
-                            {markdownText}
+                            {msg.text}
                           </Markdown>
-                          {msg.streaming && (
-                            <span
-                              aria-label="Answer streaming"
-                              className="ml-1 inline-block h-4 animate-pulse border-l-2 border-indigo-500 align-middle"
-                            />
-                          )}
-                          {msg.interrupted && (
-                            <p role="status" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
-                              Answer interrupted. Retry to generate it again.
-                            </p>
-                          )}
                         </div>
                       )}
 
@@ -2933,35 +1888,27 @@ export default function Home() {
                           <div className="font-semibold text-slate-700 dark:text-slate-300 mb-2 flex items-center gap-1.5">
                             <span>Sources cited in this answer</span>
                             <span className="text-[10px] text-slate-500 dark:text-slate-400 font-normal">
-                              ({displaySources.length})
+                              ({citedSources.length})
                             </span>
                           </div>
 
-                          {displaySources.length === 0 ? (
+                          {citedSources.length === 0 ? (
                             <p className="text-slate-500 dark:text-slate-400">
                               No supporting passages cited
                             </p>
                           ) : (
                             <div className="flex flex-wrap gap-1.5">
-                            {displaySources.map((src, srcIndex) => {
+                            {citedSources.map((src, srcIndex) => {
                               const isVisual = src.chunk_type === 'visual';
-                              const pageText = src.page
-                                ? `Page ${src.page}`
-                                : src.location || '';
+                              const pageText = src.page ? `Page ${src.page}` : '';
                               const sourceName = src.source || 'Document';
-                              const canOpen = activeChatFiles.some(
-                                (file) => file.name === sourceName && file.file,
-                              );
-                              const excerpt = getSourceExcerpt(msg.debug, src);
+                              const canOpen = ingestedFiles.some((f) => f.name === sourceName && f.file);
 
                               return (
                                 <button
                                   key={srcIndex}
                                   type="button"
-                                  onClick={() =>
-                                    canOpen &&
-                                    openFileViewer(sourceName, src.page, src.location, excerpt)
-                                  }
+                                  onClick={() => canOpen && openFileViewer(sourceName, src.page)}
                                   disabled={!canOpen}
                                   className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs font-mono transition shadow-sm ${
                                     !canOpen ? 'cursor-default opacity-90' : 'cursor-pointer hover:shadow-md hover:-translate-y-px'
@@ -3131,11 +2078,15 @@ export default function Home() {
                       )}
 
                       {!isUser && (
-                        <ExportMenu
-                          label="Export this answer"
-                          disabled={loading}
-                          onExport={(format) => void handleExport(format, index)}
-                        />
+                        <button
+                          type="button"
+                          onClick={() => handleSaveArtifact(index, msg)}
+                          className="p-1.5 min-w-10 min-h-10 flex items-center justify-center rounded-lg text-slate-400 dark:text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+                          title="Save as Markdown brief"
+                          aria-label="Save as Markdown brief"
+                        >
+                          <BookmarkCheck className="w-3.5 h-3.5" />
+                        </button>
                       )}
 
                       <button
@@ -3164,18 +2115,9 @@ export default function Home() {
               <div className="bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 px-3.5 sm:px-4 py-2.5 sm:py-3 rounded-2xl rounded-tl-none flex items-center gap-2.5 text-xs text-slate-700 dark:text-slate-300 shadow-sm">
                 <Loader2 className="w-4 h-4 animate-spin text-indigo-600 dark:text-indigo-400" />
                 <span className="hidden sm:inline">
-                  Searching your documents and preparing an answer...
+                  Retrieving document chunks & generating answer with Gemini...
                 </span>
                 <span className="sm:hidden">Generating answer...</span>
-                {streaming && (
-                  <button
-                    type="button"
-                    onClick={handleStopStreaming}
-                    className="ml-1 rounded-md border border-slate-300 px-2 py-1 font-medium text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
-                  >
-                    Stop
-                  </button>
-                )}
               </div>
             </div>
           )}
@@ -3190,17 +2132,8 @@ export default function Home() {
             background) so it reads as a composer sitting in the chat rather
             than a fixed toolbar underneath it. */}
         {!isEmptyChat && (
-          <div className="px-3 sm:px-4 lg:px-6 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:pb-4 lg:pb-5 pt-2 shrink-0">
+          <div className="px-3 sm:px-4 lg:px-6 pb-3 sm:pb-4 lg:pb-5 pt-2 shrink-0">
             <div className="max-w-4xl mx-auto">
-              {messages.some((message) => message.sender === 'user') && (
-                <div className="mb-2 flex justify-end">
-                  <ExportMenu
-                    label="Export chat"
-                    disabled={loading}
-                    onExport={(format) => void handleExport(format)}
-                  />
-                </div>
-              )}
               <ChatComposer
                 query={query}
                 setQuery={setQuery}
@@ -3211,7 +2144,7 @@ export default function Home() {
                 listening={listening}
                 pendingAttachments={pendingAttachments}
                 setPendingAttachments={setPendingAttachments}
-                ingestedFiles={activeChatFiles}
+                ingestedFiles={ingestedFiles}
                 handleRetryIngest={handleRetryIngest}
               />
             </div>
@@ -3223,10 +2156,10 @@ export default function Home() {
       </main>
 
       {/* ═══════════ FILE VIEWER PANEL ═══════════ */}
-      {viewerFile && !visualStudioOpen && (
+      {viewerFile && (
         <aside
-          className="hidden md:flex min-w-0 flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
-          style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}
+          className="hidden md:flex flex-col shrink-0 relative border-l border-slate-200 dark:border-slate-800/80 bg-white dark:bg-slate-900/95 backdrop-blur-xl animate-fade-in"
+          style={{ width: viewerWidth }}
         >
           {/* Drag handle — grabbing the left edge resizes the panel, same
               interaction as Claude's own side panel. A slightly wider
@@ -3234,7 +2167,7 @@ export default function Home() {
               actually easy to grab. */}
           <div
             onMouseDown={startViewerResize}
-            className="absolute -left-2 top-0 bottom-0 z-30 flex w-4 cursor-col-resize justify-center touch-none select-none group"
+            className="absolute -left-1.5 top-0 bottom-0 w-3 cursor-col-resize z-10 group flex justify-center"
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize file viewer"
@@ -3259,43 +2192,30 @@ export default function Home() {
             </button>
           </div>
 
-          {(viewerPage || viewerLocation) && (
+          {/* Citation banner — a plain <iframe>'s native PDF viewer can be
+              told which page to jump to (via the URL hash below) but not
+              told to highlight text inside the document itself, so this
+              banner names the cited page as the closest achievable stand-in. */}
+          {viewerPage && (
             <div className="flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/20 text-xs text-amber-800 dark:text-amber-300 shrink-0">
               <Search className="w-3.5 h-3.5 shrink-0" />
-              <span>
-                Cited from {viewerPage ? `page ${viewerPage}` : viewerLocation} — showing the
-                relevant passage below when available.
-              </span>
+              <span>Cited from page {viewerPage} — jumped there below.</span>
             </div>
           )}
 
           <div className="flex-1 min-h-0 bg-slate-100 dark:bg-slate-950">
             {viewerFile && !viewerFile.toLowerCase().endsWith('.pdf') ? (
-              viewerText ? (
-                <div className="h-full overflow-y-auto p-4">
-                  <p className="mb-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
-                    Extracted text{viewerLocation ? ` · ${viewerLocation}` : ''}
-                  </p>
-                  <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700 dark:text-slate-300">
-                    {viewerText}
-                  </p>
-                </div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
-                  <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
-                  <p className="text-sm text-slate-500 dark:text-slate-400">
-                    Native preview isn&apos;t available for this file type, and no extracted
-                    passage is attached to this citation.
-                  </p>
-                  <p className="text-xs text-slate-400 dark:text-slate-600">{viewerFile}</p>
-                </div>
-              )
+              <div className="flex flex-col items-center justify-center h-full gap-2 text-center px-6">
+                <FileText className="w-8 h-8 text-slate-400 dark:text-slate-600" />
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  In-app preview isn&apos;t available for this file type yet.
+                </p>
+                <p className="text-xs text-slate-400 dark:text-slate-600">
+                  {viewerFile}
+                </p>
+              </div>
             ) : viewerUrl ? (
-              <PdfPreview
-                key={`${viewerUrl}:${viewerPage ?? 0}`}
-                fileUrl={viewerUrl}
-                initialPage={viewerPage}
-              />
+              <PdfPreview fileUrl={viewerUrl} initialPage={viewerPage} fileName={viewerFile} />
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-slate-400 dark:text-slate-500">
                 Couldn&apos;t load this file for preview.
@@ -3305,44 +2225,6 @@ export default function Home() {
         </aside>
       )}
 
-      {visualStudioOpen && (
-        <aside className="hidden md:flex min-w-0 shrink-0 relative" style={{ width: sidePanelWidth, flex: `0 0 ${sidePanelWidth}px` }}>
-          <div
-            onMouseDown={startViewerResize}
-            className="absolute -left-2 top-0 bottom-0 z-30 flex w-4 cursor-col-resize justify-center touch-none select-none group"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize visual studio"
-          >
-            <div className="w-px h-full bg-transparent group-hover:bg-indigo-500/40 transition-colors" />
-          </div>
-          {renderSidePanel(true)}
-        </aside>
-      )}
-
-      {visualStudioOpen && (
-        <div
-          className="fixed inset-0 z-[70] flex flex-col justify-end bg-slate-950/60 md:hidden"
-          role="dialog"
-          aria-modal="true"
-          aria-label={sidePanelKind === 'artifacts' ? 'Artifacts' : 'Document side panel'}
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setVisualStudioOpen(false);
-            }
-          }}
-        >
-          <div className="relative flex h-[92dvh] min-h-0 w-full flex-col overflow-hidden rounded-t-2xl bg-white pb-[env(safe-area-inset-bottom)] shadow-2xl dark:bg-slate-900 animate-sheet-up">
-            <div className="flex shrink-0 justify-center pt-2.5 pb-1">
-              <div className="h-1 w-10 rounded-full bg-slate-300 dark:bg-slate-700" />
-            </div>
-            <div className="min-h-0 flex-1">
-              {renderSidePanel(true)}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Mobile File Viewer — see MobileFileViewer.tsx for why this is a
           separately dynamic-imported chunk rather than inline JSX here. */}
       {viewerFile && (
@@ -3350,103 +2232,8 @@ export default function Home() {
           viewerFile={viewerFile}
           viewerUrl={viewerUrl}
           viewerPage={viewerPage}
-          viewerLocation={viewerLocation}
-          viewerText={viewerText}
           onClose={closeFileViewer}
         />
-      )}
-
-      {quizOpen && !visualStudioOpen && quizConversationId === activeConversationId && (
-        <QuizPanel
-          key={`${quizConversationId}-${quizPanelVersion}`}
-          data={quizData}
-          loading={quizLoading}
-          error={quizError}
-          onClose={handleCloseQuiz}
-          onGenerate={handleGenerateQuiz}
-        />
-      )}
-
-      {compareOpen && !visualStudioOpen && compareConversationId === activeConversationId && (
-        <ComparePanel
-          files={[
-            ...new Set(
-              activeChatFiles
-                .filter((file) => file.status === 'completed')
-                .map((file) => file.name),
-            ),
-          ]}
-          data={compareData}
-          loading={compareLoading}
-          error={compareError}
-          onClose={handleCloseCompare}
-          onCompare={handleCompareDocuments}
-        />
-      )}
-
-      {printExport && (
-        <article id="document-export-print" aria-hidden="true">
-          <h1>{printExport.title}</h1>
-          {printExport.entries.map((entry, index) => (
-            <section key={`${index}-${entry.question}`}>
-              <h2>Question {index + 1}</h2>
-              <p>{entry.question}</p>
-              <h3>Answer</h3>
-              <p className="export-preserve-lines">{entry.answer}</p>
-              {entry.sources.length > 0 && (
-                <>
-                  <h3>Sources</h3>
-                  <ul>
-                    {entry.sources.map((source, sourceIndex) => (
-                      <li key={`${source.source}-${sourceIndex}`}>
-                        {source.source || 'Document'} (
-                        {source.page ? `page ${source.page}` : source.location || 'document'})
-                      </li>
-                    ))}
-                  </ul>
-                </>
-              )}
-              {entry.evidence && entry.evidence.length > 0 && (
-                <>
-                  <h3>Retrieved evidence</h3>
-                  {entry.evidence.map((text, evidenceIndex) => (
-                    <p className="export-preserve-lines" key={evidenceIndex}>
-                      {text}
-                    </p>
-                  ))}
-                </>
-              )}
-            </section>
-          ))}
-          {printExport.mindMapImage && (
-            <figure>
-              <h2>Mind map</h2>
-              <Image
-                src={printExport.mindMapImage.dataUrl}
-                alt="Generated document mind map"
-                width={printExport.mindMapImage.width}
-                height={printExport.mindMapImage.height}
-                unoptimized
-              />
-            </figure>
-          )}
-        </article>
-      )}
-      {exportError && (
-        <div
-          role="alert"
-          className="fixed bottom-4 right-4 z-[100] flex max-w-sm items-start gap-3 rounded-xl border border-rose-200 bg-white p-3 text-sm text-rose-700 shadow-xl dark:border-rose-900/70 dark:bg-slate-900 dark:text-rose-300"
-        >
-          <span>{exportError}</span>
-          <button
-            type="button"
-            aria-label="Dismiss export error"
-            onClick={() => setExportError(null)}
-            className="ml-auto shrink-0 rounded px-1 hover:bg-rose-50 dark:hover:bg-rose-950/40"
-          >
-            x
-          </button>
-        </div>
       )}
     </div>
   );
